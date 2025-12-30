@@ -338,6 +338,169 @@ def needs_scraping(comic_path: str, strict: bool = True) -> List[str]:
     return reasons
 
 
+def needs_normalize(comic_path: str, start_years: Optional[Dict[tuple, int]] = None) -> List[str]:
+    """
+    Determine if a CBZ needs normalization (Volume/AlternateSeries fixes).
+    Returns a list of reasons. If list is empty, file looks OK.
+    
+    Args:
+        comic_path: Path to the CBZ file
+        start_years: Optional dict of (series, publisher) -> start_year mappings
+                     If not provided, we can't check Volume correctness
+    """
+    reasons: List[str] = []
+    path = Path(comic_path)
+    
+    if not path.is_file() or path.suffix.lower() != ".cbz":
+        reasons.append("not a CBZ file")
+        return reasons
+    
+    try:
+        with zipfile.ZipFile(path, 'r') as z:
+            ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
+            if not ci_name:
+                reasons.append("no ComicInfo.xml")
+                return reasons
+            
+            data = z.read(ci_name)
+            xml = ET.fromstring(data)
+            
+            def get_text(tag):
+                for child in xml:
+                    if child.tag.lower() == tag.lower():
+                        return (child.text or "").strip()
+                return ""
+            
+            series = get_text("Series")
+            publisher = get_text("Publisher")
+            year = get_text("Year")
+            volume = get_text("Volume")
+            story_arc = get_text("StoryArc")
+            if not story_arc:
+                story_arc = get_text("StoryArcTitle")
+            alt_series = get_text("AlternateSeries")
+            
+            # Check 1: Volume missing
+            if not volume:
+                reasons.append("missing Volume")
+            
+            # Check 2: Volume incorrect (if we have start_years data)
+            elif start_years and series and year:
+                key = (series, publisher)
+                if key in start_years:
+                    expected_vol = str(start_years[key])
+                    if volume != expected_vol:
+                        reasons.append(f"Volume is '{volume}', should be '{expected_vol}'")
+            
+            # Check 3: StoryArc exists but AlternateSeries doesn't
+            if story_arc and not alt_series:
+                reasons.append("has StoryArc but missing AlternateSeries")
+                    
+    except Exception as e:
+        reasons.append(f"error reading ComicInfo.xml: {e}")
+    
+    return reasons
+
+
+def find_files_needing_normalize(paths: List[str],
+                                  output_format: str = "console",
+                                  output_file: Optional[str] = None) -> List[Path]:
+    """
+    Walk given files/dirs and return CBZ files that need normalization.
+    
+    Args:
+        paths: List of file or directory paths to scan
+        output_format: Output format - "console", "json", or "list"
+        output_file: Optional file path to write results to
+        
+    Returns:
+        List of Path objects for files needing normalization
+    """
+    # First pass: build start_years map
+    all_cbz = []
+    for p in paths:
+        pth = Path(p)
+        if pth.is_dir():
+            for cbz in pth.rglob("*.cbz"):
+                if "#recycle" not in str(cbz):
+                    all_cbz.append(cbz)
+        elif pth.is_file() and pth.suffix.lower() == ".cbz":
+            all_cbz.append(pth)
+    
+    # Build start_years (same logic as normalize_comic_metadata Pass 1)
+    runs: Dict[tuple, List[int]] = {}
+    for cbz in all_cbz:
+        try:
+            with zipfile.ZipFile(cbz, "r") as z:
+                ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
+                if not ci_name:
+                    continue
+                root = ET.fromstring(z.read(ci_name))
+                
+                def get_text(tag):
+                    for child in root:
+                        if child.tag.lower() == tag.lower():
+                            return (child.text or "").strip()
+                    return ""
+                
+                series = get_text("Series")
+                publisher = get_text("Publisher")
+                year_text = get_text("Year")
+                
+                if series and year_text:
+                    m = re.search(r"(\d{4})", year_text)
+                    if m:
+                        year = int(m.group(1))
+                        key = (series, publisher)
+                        runs.setdefault(key, []).append(year)
+        except Exception:
+            continue
+    
+    start_years = {k: min(v) for k, v in runs.items()}
+    
+    # Second pass: check each file
+    results: List[Path] = []
+    results_with_reasons: List[Dict[str, Any]] = []
+    
+    for cbz in all_cbz:
+        reasons = needs_normalize(str(cbz), start_years=start_years)
+        if reasons:
+            results.append(cbz)
+            results_with_reasons.append({
+                "path": str(cbz),
+                "reasons": reasons
+            })
+            if output_format == "console":
+                print(f"[NEEDS NORMALIZE] {cbz} -> {', '.join(reasons)}")
+    
+    # Handle output formats
+    if output_format == "json":
+        output_data = {
+            "total": len(results),
+            "files": results_with_reasons
+        }
+        json_output = json.dumps(output_data, indent=2)
+        
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(json_output)
+            print(f"JSON output written to: {output_file}")
+        else:
+            print(json_output)
+    
+    elif output_format == "list":
+        list_output = "\n".join(str(p) for p in results)
+        
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(list_output)
+            print(f"File list written to: {output_file}")
+        else:
+            print("\n--- FILE LIST ---")
+            print(list_output)
+    
+    return results
+
 def find_files_needing_scraping(paths: List[str], strict: bool = True, 
                                 output_format: str = "console",
                                 output_file: Optional[str] = None) -> List[Path]:
@@ -411,166 +574,211 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
     return results
 
 
-def normalize_comic_metadata(comics: List[str], dry_run: bool = False):
+def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: bool = False):
     """
-    Normalizes ComicInfo metadata for the supplied CBZ files:
-
-    - Groups by (Series, Publisher)
-    - Finds earliest Year in each group
-    - Sets <Volume> to that starting Year
-    - If <AlternateSeries> is empty/missing and <StoryArc> exists,
-      copy StoryArc → AlternateSeries
-
-    If dry_run=True, prints changes without modifying files.
+    Normalizes ComicInfo metadata.
+    - Always ensures <Volume> exists and is set to the start year.
+    - Only sets <AlternateSeries> if <StoryArc>/<StoryArcTitle> exists.
     """
     if dry_run:
         print("[DRY RUN MODE] No files will be modified\n")
-    
+
     runs: Dict[tuple, List[int]] = {}
 
-    # PASS 1: collect years
+    # ---------- PASS 1: collect years ----------
+    if verbose:
+        print("=== PASS 1: Collecting Series/Year data ===\n")
+
     for c in comics:
         path = Path(c)
         if not path.is_file() or path.suffix.lower() != ".cbz":
-            print(f"[SKIP] Not a CBZ: {path}")
             continue
+
+        if verbose:
+            print(f"[PASS1] {path.name}")
 
         try:
             with zipfile.ZipFile(path, "r") as z:
-                if "ComicInfo.xml" not in z.namelist():
-                    print(f"[WARN] No ComicInfo.xml: {path}")
+                ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
+                if not ci_name:
+                    if verbose:
+                        print("  No ComicInfo.xml found\n")
                     continue
 
-                data = z.read("ComicInfo.xml")
-                xml = ET.fromstring(data)
+                if verbose:
+                    print(f"  Found: {ci_name}")
 
-                series = (xml.findtext("Series") or "").strip()
-                publisher = (xml.findtext("Publisher") or "").strip()
-                year_text = (xml.findtext("Year") or "").strip()
+                root = ET.fromstring(z.read(ci_name))
+
+                def get_text(tag):
+                    for child in root:
+                        if child.tag.lower() == tag.lower():
+                            return (child.text or "").strip()
+                    return ""
+
+                series = get_text("Series")
+                publisher = get_text("Publisher")
+                year_text = get_text("Year")
+
+                if verbose:
+                    print(f"  Series='{series}', Publisher='{publisher}', Year='{year_text}'")
 
                 if not series or not year_text:
-                    print(f"[WARN] Missing Series or Year in: {path}")
+                    if verbose:
+                        print("  Missing Series or Year, skipping\n")
                     continue
 
-                try:
-                    year = int(year_text)
-                except ValueError:
-                    print(f"[WARN] Non-integer Year '{year_text}' in: {path}")
+                m = re.search(r"(\d{4})", year_text)
+                if not m:
+                    if verbose:
+                        print("  No 4-digit year found, skipping\n")
                     continue
 
+                year = int(m.group(1))
                 key = (series, publisher)
                 runs.setdefault(key, []).append(year)
+
+                if verbose:
+                    print(f"  Added: {key} -> {year}\n")
+
         except Exception as e:
-            print(f"[WARN] Failed reading {path}: {e}")
+            print(f"[WARN] {path.name}: {e}")
 
     if not runs:
-        print("No valid Series/Year data found. Nothing to do.")
+        print("No valid Series/Year data found.")
         return
 
-    # compute starting years
-    start_years: Dict[tuple, int] = {k: min(v) for k, v in runs.items()}
+    start_years = {k: min(v) for k, v in runs.items()}
 
-    print("\nDetected runs (based on supplied files):")
+    print("\nDetected runs:")
     for (series, publisher), y in sorted(start_years.items()):
-        pub = publisher or "Unknown"
-        print(f"- {pub} | {series} -> start year {y}")
+        print(f"- {publisher or 'Unknown'} | {series} -> start year {y}")
 
-    # PASS 2: write Volume and AlternateSeries (from StoryArc)
-    print(f"\n{'[DRY RUN] Would update' if dry_run else 'Updating'} Volume and AlternateSeries fields...\n")
+    print(f"\n{'[DRY RUN] Checking' if dry_run else 'Updating'} metadata...\n")
 
-    changes_count = 0
+    # ---------- PASS 2: Apply ----------
+    changes = 0
+
     for c in comics:
         path = Path(c)
+
+        if verbose:
+            print(f"[PASS2] {path.name}")
+
         if not path.is_file() or path.suffix.lower() != ".cbz":
             continue
 
         try:
             with zipfile.ZipFile(path, "r") as z:
-                if "ComicInfo.xml" not in z.namelist():
+                ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
+                if not ci_name:
+                    if verbose:
+                        print("  No ComicInfo.xml\n")
                     continue
 
-                data = z.read("ComicInfo.xml")
-                xml = ET.fromstring(data)
+                if verbose:
+                    print(f"  Reading: {ci_name}")
 
-                series = (xml.findtext("Series") or "").strip()
-                publisher = (xml.findtext("Publisher") or "").strip()
+                data = z.read(ci_name)
+                root = ET.fromstring(data)
+
+                def get_el(tag):
+                    for child in root:
+                        if child.tag.lower() == tag.lower():
+                            return child
+                    return None
+
+                series_el = get_el("Series")
+                publisher_el = get_el("Publisher")
+                series = (series_el.text or "").strip() if series_el is not None else ""
+                publisher = (publisher_el.text or "").strip() if publisher_el is not None else ""
                 key = (series, publisher)
 
+                if verbose:
+                    print(f"  Key: {key}")
+
                 if key not in start_years:
+                    if verbose:
+                        print(f"  Key {key} not in start_years, skipping\n")
                     continue
 
-                # ----- Volume from starting year -----
-                start_year = str(start_years[key])
-                vol_elem = xml.find("Volume")
-                if vol_elem is None:
-                    vol_elem = ET.SubElement(xml, "Volume")
+                target_year = str(start_years[key])
 
-                old_vol_val = (vol_elem.text or "").strip()
-                volume_changed = old_vol_val != start_year
+                # --- Volume: always ensure it exists and is correct ---
+                vol_el = get_el("Volume")
+                if vol_el is None:
+                    if verbose:
+                        print(f"  <Volume> missing, creating it")
+                    vol_el = ET.SubElement(root, "Volume")
+                else:
+                    if verbose:
+                        print(f"  <Volume> exists with text='{vol_el.text}'")
 
-                # ----- AlternateSeries from StoryArc if empty -----
-                # Try both StoryArc and StoryArcTitle just in case
-                story_arc = (
-                    (xml.findtext("StoryArc") or "")
-                    or (xml.findtext("StoryArcTitle") or "")
-                ).strip()
+                vol_el.text = target_year
+                if verbose:
+                    print(f"  Set <Volume> to '{target_year}'")
 
-                alt_series_elem = xml.find("AlternateSeries")
-                if alt_series_elem is None:
-                    alt_series_elem = ET.SubElement(xml, "AlternateSeries")
+                # --- AlternateSeries: only if StoryArc present ---
+                sa_el = get_el("StoryArc")
+                sat_el = get_el("StoryArcTitle")
+                story_arc = (sa_el.text or "").strip() if sa_el is not None else ""
+                if not story_arc:
+                    story_arc = (sat_el.text or "").strip() if sat_el is not None else ""
 
-                old_alt_series = (alt_series_elem.text or "").strip()
+                if story_arc:
+                    alt_el = get_el("AlternateSeries")
+                    if alt_el is None or not (alt_el.text or "").strip():
+                        if alt_el is None:
+                            alt_el = ET.SubElement(root, "AlternateSeries")
+                        alt_el.text = story_arc
+                        if verbose:
+                            print(f"  Set <AlternateSeries> to '{story_arc}'")
 
-                alt_series_changed = False
-                if not old_alt_series and story_arc:
-                    # Only copy if AlternateSeries is empty and StoryArc exists
-                    alt_series_changed = True
+                changes += 1
 
-                # If nothing changed, skip
-                if not volume_changed and not alt_series_changed:
-                    continue
+                if verbose:
+                    print("\n--- XML PREVIEW (what will be written) ---")
+                    preview = ET.tostring(root, encoding="unicode")
+                    # Show just the first 2000 chars to avoid flooding terminal
+                    print(preview[:2000])
+                    if len(preview) > 2000:
+                        print("... (truncated)")
+                    print("--- END PREVIEW ---\n")
 
-                # Print what's changing
-                if volume_changed:
-                    print(f"{'[DRY RUN] Would update' if dry_run else 'Updating'} {path.name}: Volume {old_vol_val or '(empty)'} -> {start_year}")
-                
-                if alt_series_changed:
-                    print(f"{'[DRY RUN] Would update' if dry_run else 'Updating'} {path.name}: AlternateSeries (empty) -> '{story_arc}'")
-
-                changes_count += 1
-
-                # Skip actual file modification in dry-run mode
                 if dry_run:
+                    print(f"[DRY RUN] Would update {path.name}\n")
                     continue
 
-                # Apply changes
-                if volume_changed:
-                    vol_elem.text = start_year
-                
-                if alt_series_changed:
-                    alt_series_elem.text = story_arc
-
-                new_xml = ET.tostring(xml, encoding="utf-8", xml_declaration=True)
-
-                # rewrite CBZ safely
+                # Write back
+                new_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
                 tmp = tempfile.NamedTemporaryFile(delete=False)
                 tmp.close()
 
-                with zipfile.ZipFile(path, "r") as zin, \
-                     zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zout:
+                if verbose:
+                    print(f"  Writing to temp: {tmp.name}")
+
+                with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zout:
                     for item in zin.infolist():
-                        if item.filename == "ComicInfo.xml":
-                            zout.writestr("ComicInfo.xml", new_xml)
+                        if item.filename == ci_name:
+                            if verbose:
+                                print(f"  Replacing '{item.filename}' in ZIP")
+                            zout.writestr(item.filename, new_xml)
                         else:
                             zout.writestr(item, zin.read(item.filename))
 
                 shutil.move(tmp.name, path)
 
-        except Exception as e:
-            print(f"[WARN] Failed updating {path}: {e}")
+                if verbose:
+                    print(f"  ✓ Updated {path.name}\n")
 
-    print(f"\n{'[DRY RUN] Would change' if dry_run else 'Changed'} {changes_count} files")
-    print("\nDone normalizing metadata ✔")
+        except Exception as e:
+            print(f"[WARN] {path.name}: {e}")
+            if verbose:
+                import traceback
+                traceback.print_exc()
+
+    print(f"\n{'[DRY RUN] Would change' if dry_run else 'Changed'} {changes} files")
+    print("Done ✔")
 
 
 def collect_cbz_from_paths(paths: List[str]) -> List[str]:
@@ -804,7 +1012,7 @@ def update_kapowarr_volumes(kapowarr_url: str = "http://localhost:5656",
         if not dry_run and (volumes_to_add > 0 or volumes_to_update > 0):
             update_body = {'cmd': 'update_all'}
             requests.post(
-                f"{kapowarr_url}/api/system/tasks",
+    f"{kapowarr_url}/api/system/tasks",
                 params=params,
                 json=update_body
             )
@@ -823,6 +1031,17 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser(description="Comic pipeline helper CLI")
+    
+    # ---------- API keys (add BEFORE subparsers) ----------
+    parser.add_argument(
+        "--comicvine-key",
+        help="ComicVine API key (overrides env/default)",
+    )
+    parser.add_argument(
+        "--kapowarr-key",
+        help="Kapowarr API key (overrides env/default)",
+    )
+    
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # ---------- scan ----------
@@ -854,6 +1073,11 @@ if __name__ == "__main__":
         "--dry-run",
         action="store_true",
         help="Preview changes without modifying files",
+    )
+    normalize.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed debug information",
     )
 
     # ---------- webp ----------
@@ -899,41 +1123,44 @@ if __name__ == "__main__":
         help="Preview sync without making changes",
     )
 
-    # ---------- API keys ----------
-    parser.add_argument(
-        "--comicvine-key",
-        help="ComicVine API key (overrides env/default)",
+    # ---------- check-normalize ----------
+    check_norm = sub.add_parser(
+        "check-normalize",
+        help="Find comics that need normalization (missing/incorrect Volume, etc.)"
     )
-    parser.add_argument(
-        "--kapowarr-key",
-        help="Kapowarr API key (overrides env/default)",
+    check_norm.add_argument("paths", nargs="+", help="Files or directories to scan")
+    check_norm.add_argument(
+        "--output",
+        choices=["console", "json", "list"],
+        default="console",
+        help="Output format: console (default), json, or list",
+    )
+    check_norm.add_argument(
+        "--output-file",
+        help="Write output to file instead of stdout",
     )
 
+    # Parse arguments
     args = parser.parse_args()
 
     # --- API key setup ---
-    comicvine_key = (
-        args.comicvine_key
-        or os.getenv("COMICVINE_API_KEY")
-    )
-    kapowarr_key = (
-        args.kapowarr_key
-        or os.getenv("KAPOWARR_API_KEY")
-    )
+    comicvine_key = args.comicvine_key or os.getenv("COMICVINE_API_KEY")
+    kapowarr_key = args.kapowarr_key or os.getenv("KAPOWARR_API_KEY")
 
-    # Validate required API keys
-    if not comicvine_key:
-        parser.error(
-            "ComicVine API key required. Set COMICVINE_API_KEY environment variable "
-            "or use --comicvine-key argument"
-        )
+    # Only require keys for commands that actually use them
+    if args.cmd == "kapowarr-sync":
+        if not comicvine_key:
+            parser.error(
+                "ComicVine API key required for kapowarr-sync. "
+                "Set COMICVINE_API_KEY env var or use --comicvine-key."
+            )
+        if not kapowarr_key:
+            parser.error(
+                "Kapowarr API key required for kapowarr-sync. "
+                "Set KAPOWARR_API_KEY env var or use --kapowarr-key."
+            )
 
-    if args.cmd == "kapowarr-sync" and not kapowarr_key:
-        parser.error(
-            "Kapowarr API key required for sync command. Set KAPOWARR_API_KEY "
-            "environment variable or use --kapowarr-key argument"
-        )
-
+    # Set whatever keys we have (some commands may not use them)
     try:
         APIKeys.set_api_keys(
             comic_vine_api_key=comicvine_key,
@@ -965,7 +1192,7 @@ if __name__ == "__main__":
             if not files:
                 print("No CBZ files found in specified paths", file=sys.stderr)
                 sys.exit(1)
-            normalize_comic_metadata(files, dry_run=args.dry_run)
+            normalize_comic_metadata(files, dry_run=args.dry_run, verbose=args.verbose)
 
         elif args.cmd == "webp":
             files = collect_cbz_from_paths(args.paths)
@@ -980,6 +1207,13 @@ if __name__ == "__main__":
                 comics_path=args.comics_path,
                 verbose=args.verbose,
                 dry_run=args.dry_run,
+            )
+
+        elif args.cmd == "check-normalize":
+            needs_norm = find_files_needing_normalize(
+                args.paths,
+                output_format=args.output,
+                output_file=args.output_file
             )
 
     except FileNotFoundError as e:
