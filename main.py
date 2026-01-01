@@ -496,45 +496,37 @@ def find_files_needing_normalize(paths: List[str],
                 f.write(list_output)
             print(f"File list written to: {output_file}")
         else:
-            print("\n--- FILE LIST ---")
             print(list_output)
     
     return results
 
-def find_files_needing_scraping(paths: List[str], strict: bool = True, 
+
+def find_files_needing_scraping(paths: List[str], strict: bool = True,
                                 output_format: str = "console",
                                 output_file: Optional[str] = None) -> List[Path]:
     """
-    Walk given files/dirs and return CBZ files that need scraping.
-    
-    Args:
-        paths: List of file or directory paths to scan
-        strict: If True, also check for Publisher and Title
-        output_format: Output format - "console", "json", or "list"
-        output_file: Optional file path to write results to
-        
-    Returns:
-        List of Path objects for files needing scraping
+    Walk given files/dirs and return CBZ/CBR files that need scraping.
     """
     results: List[Path] = []
     results_with_reasons: List[Dict[str, Any]] = []
-    
+
     for p in paths:
         pth = Path(p)
         if pth.is_dir():
-            for cbz in pth.rglob("*.cbz"):
-                if "#recycle" in str(cbz):
-                    continue
-                reasons = needs_scraping(str(cbz), strict=strict)
-                if reasons:
-                    results.append(cbz)
-                    results_with_reasons.append({
-                        "path": str(cbz),
-                        "reasons": reasons
-                    })
-                    if output_format == "console":
-                        print(f"[NEEDS SCRAPE] {cbz} -> {', '.join(reasons)}")
-        elif pth.is_file() and pth.suffix.lower() == ".cbz":
+            for f in pth.rglob("*"):
+                if f.is_file() and f.suffix.lower() in (".cbz", ".cbr"):
+                    if "#recycle" in str(f):
+                        continue
+                    reasons = needs_scraping(str(f), strict=strict)
+                    if reasons:
+                        results.append(f)
+                        results_with_reasons.append({
+                            "path": str(f),
+                            "reasons": reasons
+                        })
+                        if output_format == "console":
+                            print(f"[NEEDS SCRAPE] {f} -> {', '.join(reasons)}")
+        elif pth.is_file() and pth.suffix.lower() in (".cbz", ".cbr"):
             reasons = needs_scraping(str(pth), strict=strict)
             if reasons:
                 results.append(pth)
@@ -544,7 +536,7 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
                 })
                 if output_format == "console":
                     print(f"[NEEDS SCRAPE] {pth} -> {', '.join(reasons)}")
-    
+
     # Handle output formats
     if output_format == "json":
         output_data = {
@@ -568,7 +560,6 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
                 f.write(list_output)
             print(f"File list written to: {output_file}")
         else:
-            print("\n--- FILE LIST ---")
             print(list_output)
     
     return results
@@ -577,8 +568,9 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
 def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: bool = False):
     """
     Normalizes ComicInfo metadata.
-    - Always ensures <Volume> exists and is set to the start year.
-    - Only sets <AlternateSeries> if <StoryArc>/<StoryArcTitle> exists.
+    - Always ensures <Volume> exists and is set to the start year (per Series+Publisher run).
+    - Sets <AlternateSeries> from StoryArc/StoryArcTitle if present and AlternateSeries is empty.
+    Prints a per-file summary of what changed.
     """
     if dry_run:
         print("[DRY RUN MODE] No files will be modified\n")
@@ -661,12 +653,11 @@ def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: 
 
     for c in comics:
         path = Path(c)
+        if not path.is_file() or path.suffix.lower() != ".cbz":
+            continue
 
         if verbose:
             print(f"[PASS2] {path.name}")
-
-        if not path.is_file() or path.suffix.lower() != ".cbz":
-            continue
 
         try:
             with zipfile.ZipFile(path, "r") as z:
@@ -704,46 +695,63 @@ def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: 
 
                 target_year = str(start_years[key])
 
-                # --- Volume: always ensure it exists and is correct ---
+                # --- Track old values for summary ---
                 vol_el = get_el("Volume")
+                old_volume = (vol_el.text or "").strip() if vol_el is not None else None
+
+                # Ensure <Volume> exists
                 if vol_el is None:
                     if verbose:
-                        print(f"  <Volume> missing, creating it")
+                        print("  <Volume> missing, creating it")
                     vol_el = ET.SubElement(root, "Volume")
-                else:
-                    if verbose:
-                        print(f"  <Volume> exists with text='{vol_el.text}'")
 
                 vol_el.text = target_year
-                if verbose:
-                    print(f"  Set <Volume> to '{target_year}'")
 
-                # --- AlternateSeries: only if StoryArc present ---
+                # --- AlternateSeries from StoryArc/StoryArcTitle ---
                 sa_el = get_el("StoryArc")
                 sat_el = get_el("StoryArcTitle")
+                alt_el = get_el("AlternateSeries")
+
                 story_arc = (sa_el.text or "").strip() if sa_el is not None else ""
                 if not story_arc:
                     story_arc = (sat_el.text or "").strip() if sat_el is not None else ""
 
+                old_alt = (alt_el.text or "").strip() if alt_el is not None else None
+
                 if story_arc:
-                    alt_el = get_el("AlternateSeries")
                     if alt_el is None or not (alt_el.text or "").strip():
                         if alt_el is None:
                             alt_el = ET.SubElement(root, "AlternateSeries")
                         alt_el.text = story_arc
-                        if verbose:
-                            print(f"  Set <AlternateSeries> to '{story_arc}'")
 
-                changes += 1
+                # Decide if anything actually changed
+                new_volume = vol_el.text.strip() if vol_el is not None and vol_el.text else None
+                new_alt = (alt_el.text or "").strip() if alt_el is not None else None
+
+                volume_changed = (old_volume != new_volume)
+                alt_changed = (old_alt != new_alt)
+
+                if not volume_changed and not alt_changed:
+                    if verbose:
+                        print(f"  No changes needed for {path.name}\n")
+                    continue
+
+                # Print a concise per-file summary (even if not verbose)
+                print(f"[NORMALIZE] {path.name}")
+                if volume_changed:
+                    print(f"  Volume: {old_volume or '<none>'} -> {new_volume}")
+                if alt_changed:
+                    print(f"  AlternateSeries: {old_alt or '<none>'} -> {new_alt}")
 
                 if verbose:
                     print("\n--- XML PREVIEW (what will be written) ---")
                     preview = ET.tostring(root, encoding="unicode")
-                    # Show just the first 2000 chars to avoid flooding terminal
                     print(preview[:2000])
                     if len(preview) > 2000:
                         print("... (truncated)")
                     print("--- END PREVIEW ---\n")
+
+                changes += 1
 
                 if dry_run:
                     print(f"[DRY RUN] Would update {path.name}\n")
@@ -779,7 +787,6 @@ def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: 
 
     print(f"\n{'[DRY RUN] Would change' if dry_run else 'Changed'} {changes} files")
     print("Done ✔")
-
 
 def collect_cbz_from_paths(paths: List[str]) -> List[str]:
     """
@@ -1025,6 +1032,68 @@ def update_kapowarr_volumes(kapowarr_url: str = "http://localhost:5656",
         print(f"Error communicating with Kapowarr: {e}", file=sys.stderr)
         sys.exit(1)
 
+def run_pipeline(paths: List[str], strict: bool = True, verbose: bool = False):
+    """
+    Full pipeline: scan → perdoo → normalize
+    """
+    import subprocess
+    
+    print("=== Comic Pipeline ===")
+    print(f"Scanning {len(paths)} path(s)...\n")
+    
+    # 1. Scan
+    files_needing_scraping = find_files_needing_scraping(
+        paths, 
+        strict=strict,
+        output_format="console"
+    )
+    
+    if not files_needing_scraping:
+        print("\n✓ No files need scraping.")
+        return
+    
+    print(f"\nFound {len(files_needing_scraping)} files needing scraping.")
+    
+    # 2. Run Perdoo on each
+    print("\nRunning Perdoo scraper...")
+    failed = []
+    for i, file in enumerate(files_needing_scraping, 1):
+        print(f"  [{i}/{len(files_needing_scraping)}] Scraping: {file.name}")
+        try:
+            result = subprocess.run(
+                ["perdoo", "import", "--skip-clean", str(file)],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            if verbose:
+                print(f"    {result.stdout.strip()}")
+        except subprocess.CalledProcessError as e:
+            print(f"    [ERROR] Failed to scrape: {e}")
+            if verbose:
+                print(f"    {e.stderr}")
+            failed.append(file)
+        except FileNotFoundError:
+            print("\n[ERROR] 'perdoo' command not found. Is Perdoo installed and in PATH?")
+            sys.exit(1)
+    
+    if failed:
+        print(f"\n[WARN] {len(failed)} files failed to scrape, skipping normalization for those.")
+        files_to_normalize = [str(f) for f in files_needing_scraping if f not in failed]
+    else:
+        print("\n✓ Perdoo scraping complete.")
+        files_to_normalize = [str(f) for f in files_needing_scraping]
+    
+    if not files_to_normalize:
+        print("\nNo files to normalize.")
+        return
+    
+    # 3. Normalize
+    print("\nNormalizing metadata...")
+    normalize_comic_metadata(files_to_normalize, dry_run=False, verbose=verbose)
+    
+    print("\n✓ Pipeline complete!")
+
 
 if __name__ == "__main__":
     import argparse
@@ -1140,6 +1209,23 @@ if __name__ == "__main__":
         help="Write output to file instead of stdout",
     )
 
+    # ---------- pipeline ----------
+    pipeline = sub.add_parser(
+        "pipeline",
+        help="Full workflow: scan → perdoo scrape → normalize"
+    )
+    pipeline.add_argument("paths", nargs="+", help="Files or directories to process")
+    pipeline.add_argument(
+        "--strict",
+        action="store_true",
+        help="Also require Publisher + Title during scan",
+    )
+    pipeline.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose output",
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -1215,6 +1301,10 @@ if __name__ == "__main__":
                 output_format=args.output,
                 output_file=args.output_file
             )
+
+        elif args.cmd == "pipeline":
+            run_pipeline(args.paths, strict=args.strict, verbose=args.verbose)
+
 
     except FileNotFoundError as e:
         print(f"Error: File or directory not found - {e}", file=sys.stderr)
