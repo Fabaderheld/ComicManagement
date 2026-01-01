@@ -398,17 +398,3 @@ python3 main.py normalize --dry-run --verbose /path/to/comics
 ## Contributing
 
 [Your contribution guidelines here]
-```
-
----
-
-This README covers:
-
-- ✅ What each command does
-- ✅ Detailed scan checks (with the MetronInfo.xml behavior)
-- ✅ Detailed normalize logic (two-pass explanation)
-- ✅ Bash pipeline workflow
-- ✅ Common troubleshooting scenarios
-- ✅ Examples for every use case
-
-Feel free to adjust the license/contributing sections or add installation details specific to your setup!
