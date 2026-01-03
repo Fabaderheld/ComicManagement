@@ -1243,68 +1243,6 @@ def update_kapowarr_volumes(kapowarr_url: str = "http://localhost:5656",
         print(f"Error communicating with Kapowarr: {e}", file=sys.stderr)
         sys.exit(1)
 
-def run_pipeline(paths: List[str], strict: bool = True, verbose: bool = False):
-    """
-    Full pipeline: scan → perdoo → normalize
-    """
-    import subprocess
-    
-    print("=== Comic Pipeline ===")
-    print(f"Scanning {len(paths)} path(s)...\n")
-    
-    # 1. Scan
-    files_needing_scraping = find_files_needing_scraping(
-        paths, 
-        strict=strict,
-        check_filenames=True,
-        output_format="console"
-    )
-    
-    if not files_needing_scraping:
-        print("\n✓ No files need scraping.")
-        return
-    
-    print(f"\nFound {len(files_needing_scraping)} files needing scraping.")
-    
-    # 2. Run Perdoo on each
-    print("\nRunning Perdoo scraper...")
-    failed = []
-    for i, file in enumerate(files_needing_scraping, 1):
-        print(f"  [{i}/{len(files_needing_scraping)}] Scraping: {file.name}")
-        try:
-            result = subprocess.run(
-                ["perdoo", "import", "--skip-clean", str(file)],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            if verbose:
-                print(f"    {result.stdout.strip()}")
-        except subprocess.CalledProcessError as e:
-            print(f"    [ERROR] Failed to scrape: {e}")
-            if verbose:
-                print(f"    {e.stderr}")
-            failed.append(file)
-        except FileNotFoundError:
-            print("\n[ERROR] 'perdoo' command not found. Is Perdoo installed and in PATH?")
-            sys.exit(1)
-    
-    if failed:
-        print(f"\n[WARN] {len(failed)} files failed to scrape, skipping normalization for those.")
-        files_to_normalize = [str(f) for f in files_needing_scraping if f not in failed]
-    else:
-        print("\n✓ Perdoo scraping complete.")
-        files_to_normalize = [str(f) for f in files_needing_scraping]
-    
-    if not files_to_normalize:
-        print("\nNo files to normalize.")
-        return
-    
-    # 3. Normalize
-    print("\nNormalizing metadata...")
-    normalize_comic_metadata(files_to_normalize, dry_run=False, verbose=verbose)
-    
-    print("\n✓ Pipeline complete!")
 
 def metron_scrape(paths: List[str], ignore_existing: bool = True, dry_run: bool = False) -> int:
     """
@@ -1402,12 +1340,141 @@ def metron_scrape(paths: List[str], ignore_existing: bool = True, dry_run: bool 
     
     return 0 if error_count == 0 else 1
 
+def run_pipeline(
+    paths: list[str],
+    do_repair: bool = False,
+    do_scrape: bool = False,
+    do_normalize: bool = False,
+    do_webp: bool = False,
+    do_kapowarr: bool = False,
+    strict: bool = False,
+    check_filenames: bool = False,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> None:
+    """
+    Run a complete pipeline: scan → repair → scrape → normalize → webp → kapowarr
+    """
+    print(f"{Colors.BLUE}{'='*60}{Colors.RESET}")
+    print(f"{Colors.BLUE}PIPELINE START{Colors.RESET}")
+    print(f"{Colors.BLUE}{'='*60}{Colors.RESET}\n")
+    
+    # Step 1: Collect all CBZ files
+    files = collect_cbz_from_paths(paths)
+    if not files:
+        print("No .cbz files found.", file=sys.stderr)
+        return
+    
+    print(f"Found {len(files)} comic file(s)\n")
+    
+    # Step 2: Scan all files and categorize issues
+    print(f"{Colors.BLUE}[STEP 1/6] SCANNING{Colors.RESET}")
+    print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+
+    needs_repair = []
+    needs_scraping_list = []
+    ok_files = []  # Files with good metadata
+
+    for f in files:
+        reasons = needs_scraping(f, strict=strict, check_filenames=check_filenames, verbose=verbose)
+        
+        if "non-standard archive structure" in ' '.join(reasons):
+            needs_repair.append(f)
+        elif reasons:  # Has other issues (missing metadata, etc.)
+            needs_scraping_list.append(f)
+        else:
+            # File is OK
+            ok_files.append(f)
+
+    print(f"\n{Colors.BLUE}SCAN SUMMARY:{Colors.RESET}")
+    print(f"  • {len(needs_repair)} file(s) need repair")
+    print(f"  • {len(needs_scraping_list)} file(s) need scraping")
+    print(f"  • {len(ok_files)} file(s) have complete metadata")
+    print(f"  • {len(files)} total file(s) in pipeline\n")
+
+    # Step 3: Repair
+    if do_repair and needs_repair:
+        print(f"\n{Colors.BLUE}[STEP 2/6] REPAIRING{Colors.RESET}")
+        print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+        
+        repaired = 0
+        for f in needs_repair:
+            if repair_archive(f, dry_run=dry_run, verbose=verbose):
+                repaired += 1
+                # After repair, rescan to see if it needs scraping or is OK
+                if not dry_run:
+                    reasons = needs_scraping(f, strict=strict, check_filenames=check_filenames, verbose=False)
+                    if reasons:
+                        needs_scraping_list.append(f)
+                    else:
+                        ok_files.append(f)
+        
+        print(f"\n{'[DRY RUN] Would repair' if dry_run else 'Repaired'} {repaired}/{len(needs_repair)} file(s)")
+    else:
+        print(f"\n{Colors.BLUE}[STEP 2/6] REPAIR{Colors.RESET} - Skipped")
+
+    # Step 4: Scrape
+    if do_scrape and needs_scraping_list:
+        print(f"\n{Colors.BLUE}[STEP 3/6] SCRAPING{Colors.RESET}")
+        print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+        
+        if dry_run:
+            print(f"[DRY RUN] Would scrape {len(needs_scraping_list)} file(s):")
+            for f in needs_scraping_list[:10]:
+                print(f"  • {os.path.basename(f)}")
+            if len(needs_scraping_list) > 10:
+                print(f"  ... and {len(needs_scraping_list) - 10} more")
+        else:
+            print(f"{Colors.YELLOW}⚠ Scraping requires external tool (perdoo){Colors.RESET}")
+            print(f"Run this command manually:\n")
+            print(f"  perdoo scrape \\")
+            for i, f in enumerate(needs_scraping_list):
+                end = " \\" if i < len(needs_scraping_list) - 1 else ""
+                print(f"    '{f}'{end}")
+            print()
+    else:
+        print(f"\n{Colors.BLUE}[STEP 3/6] SCRAPE{Colors.RESET} - Skipped")
+
+    # Step 5: Normalize (only on files with complete metadata)
+    if do_normalize and ok_files:
+        print(f"\n{Colors.BLUE}[STEP 4/6] NORMALIZING{Colors.RESET}")
+        print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+        
+        changed = normalize_comic_metadata(ok_files, dry_run=dry_run)
+        print(f"\n{'[DRY RUN] Would modify' if dry_run else 'Modified'} {changed}/{len(ok_files)} file(s)")
+    else:
+        print(f"\n{Colors.BLUE}[STEP 4/6] NORMALIZE{Colors.RESET} - Skipped (no files with complete metadata)")
+
+    # Step 6: WebP (all files)
+    if do_webp:
+        print(f"\n{Colors.BLUE}[STEP 5/6] WEBP CONVERSION{Colors.RESET}")
+        print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+        
+        converted = convert_to_webp(files, dry_run=dry_run)
+        print(f"\n{'[DRY RUN] Would convert' if dry_run else 'Converted'} {converted} file(s)")
+    else:
+        print(f"\n{Colors.BLUE}[STEP 5/6] WEBP{Colors.RESET} - Skipped")
+
+    # Step 7: Kapowarr (all files)
+    if do_kapowarr:
+        print(f"\n{Colors.BLUE}[STEP 6/6] KAPOWARR SYNC{Colors.RESET}")
+        print(f"{Colors.BLUE}{'-'*60}{Colors.RESET}\n")
+        
+        # This requires API keys, so check they exist
+        try:
+            api_keys = APIKeys()  # Will raise if keys missing
+            update_kapowarr_volumes(files, api_keys, dry_run=dry_run)
+        except ValueError as e:
+            print(f"{Colors.RED}✗ ERROR:{Colors.RESET} {e}", file=sys.stderr)
+    else:
+        print(f"\n{Colors.BLUE}[STEP 6/6] KAPOWARR{Colors.RESET} - Skipped")
+
 if __name__ == "__main__":
     import argparse
     import os
 
     parser = argparse.ArgumentParser(description="Comic pipeline helper CLI")
-    
+        
     # ---------- API keys (add BEFORE subparsers) ----------
     parser.add_argument(
         "--comicvine-key",
@@ -1528,23 +1595,6 @@ if __name__ == "__main__":
         help="Write output to file instead of stdout",
     )
 
-    # ---------- pipeline ----------
-    pipeline = sub.add_parser(
-        "pipeline",
-        help="Full workflow: scan → perdoo scrape → normalize"
-    )
-    pipeline.add_argument("paths", nargs="+", help="Files or directories to process")
-    pipeline.add_argument(
-        "--strict",
-        action="store_true",
-        help="Also require Publisher + Title during scan",
-    )
-    pipeline.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Verbose output",
-    )
-    
     # ---------- metron scraper ----------    
     metron_parser = sub.add_parser(
         "metron-scrape",
@@ -1581,6 +1631,70 @@ if __name__ == "__main__":
         action="store_true",
         help="Show what would be repaired without making changes",
     )
+
+    # Pipeline command
+    pipeline_parser = sub.add_parser(
+        "pipeline",
+        help="Run automated pipeline: scan → repair → scrape → normalize → webp → kapowarr",
+    )
+    pipeline_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Comic file(s) or folder(s) to process",
+    )
+    pipeline_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Enable repair step (fix archive structure)",
+    )
+    pipeline_parser.add_argument(
+        "--scrape",
+        action="store_true",
+        help="Enable scrape step (list files needing external scraping)",
+    )
+    pipeline_parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Enable normalize step (fix Volume/AlternateSeries)",
+    )
+    pipeline_parser.add_argument(
+        "--webp",
+        action="store_true",
+        help="Enable WebP conversion step",
+    )
+    pipeline_parser.add_argument(
+        "--kapowarr-sync",
+        action="store_true",
+        help="Enable Kapowarr sync step",
+    )
+    pipeline_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Enable all pipeline steps",
+    )
+    pipeline_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without making changes",
+    )
+
+    pipeline_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Use strict checking (require standard filenames)",
+    )
+    pipeline_parser.add_argument(
+        "--check-filenames",
+        action="store_true",
+        help="Check filename format during scan",
+    )
+
+    pipeline_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed output for each file",
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -1657,9 +1771,6 @@ if __name__ == "__main__":
                 output_file=args.output_file
             )
 
-        elif args.cmd == "pipeline":
-            run_pipeline(args.paths, strict=args.strict, verbose=args.verbose)
-
         elif args.cmd == "metron-scrape":
             sys.exit(metron_scrape(
                 args.paths,
@@ -1682,6 +1793,34 @@ if __name__ == "__main__":
                     repaired += 1
             
             print(f"\n{'[DRY RUN] Would repair' if args.dry_run else 'Repaired'} {repaired}/{len(files)} file(s)")
+
+        elif args.cmd == "pipeline":
+            # If --all is specified, enable everything
+            if args.all:
+                do_repair = do_scrape = do_normalize = do_webp = do_kapowarr = True
+            else:
+                do_repair = args.repair
+                do_scrape = args.scrape
+                do_normalize = args.normalize
+                do_webp = args.webp
+                do_kapowarr = args.kapowarr_sync
+            
+            # DEBUG
+            print(f"DEBUG: do_repair={do_repair}, do_scrape={do_scrape}, do_normalize={do_normalize}, do_webp={do_webp}, do_kapowarr={do_kapowarr}", file=sys.stderr)
+            
+            run_pipeline(
+                args.paths,
+                do_repair=do_repair,
+                do_scrape=do_scrape,
+                do_normalize=do_normalize,
+                do_webp=do_webp,
+                do_kapowarr=do_kapowarr,
+                strict=getattr(args, 'strict', False),
+                check_filenames=getattr(args, 'check_filenames', False),
+                dry_run=getattr(args, 'dry_run', False),
+                verbose=getattr(args, 'verbose', False),
+            )
+
 
 
     except FileNotFoundError as e:
