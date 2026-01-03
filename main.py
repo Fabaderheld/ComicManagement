@@ -12,46 +12,55 @@ import json
 import sys
 import re
 from PIL import Image as PILImage
+import re
+from darkseid.comic import Comic, MetadataFormat
+from enum import Enum
+import contextlib
+import io
+
+class FilenameFormat(Enum):
+    """Enum for comic filename formats"""
+    KAPOWARR = 1  # Series Name (Year) #001.cbz
+    MYLAR = 2     # Series Name #001 (Year).cbz
+    UNKNOWN = 3
 
 
-class ComicInfo:
-    """Class to handle ComicInfo extraction and manipulation"""
-    
-    @staticmethod
-    def get_comic_info(comic_path: str) -> Optional[ET.Element]:
-        """
-        Extracts and returns ComicInfo from a .cbz file.
-        
-        Args:
-            comic_path: The path to the comic file (.cbz format)
-            
-        Returns:
-            XML Element containing ComicInfo data, or None if not found
-            
-        Example:
-            comic_info = ComicInfo.get_comic_info("/path/to/comic.cbz")
-        """
-        try:
-            with zipfile.ZipFile(comic_path, 'r') as zip_file:
-                # Find ComicInfo.xml file
-                comic_info_file = None
-                for file_name in zip_file.namelist():
-                    if 'ComicInfo.xml' in file_name:
-                        comic_info_file = file_name
-                        break
-                
-                if not comic_info_file:
-                    return None
-                
-                # Read and parse the XML content
-                with zip_file.open(comic_info_file) as file:
-                    xml_content = file.read()
-                    root = ET.fromstring(xml_content)
-                    return root
-                    
-        except Exception as e:
-            print(f"Error reading ComicInfo: {e}")
-            return None
+def get_filename_format(filename: str) -> FilenameFormat:
+    """Detect comic filename format."""
+    base = os.path.basename(filename)
+
+    # Kapowarr: Series Name (Year) #001.cbz
+    if re.match(r".+\s\(\d{4}\)\s#\d+.*\.cb[zr]$", base):
+        return FilenameFormat.KAPOWARR
+
+    # Mylar: Series Name #001 (Year).cbz
+    if re.match(r".+\s#\d+\s\(\d{4}\).*\.cb[zr]$", base):
+        return FilenameFormat.MYLAR
+
+    return FilenameFormat.UNKNOWN
+
+# --- Color/Symbol helpers ---
+class Colors:
+    """ANSI color codes for terminal output"""
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = "\033[36m"
+
+def check_mark(passed: bool) -> str:
+    """Returns colored checkmark or X"""
+    if passed:
+        return f"{Colors.GREEN}✓{Colors.RESET}"
+    else:
+        return f"{Colors.RED}✗{Colors.RESET}"
+
+def status_line(label: str, value: str, passed: bool = True) -> str:
+    """Format a status line with checkmark/X"""
+    symbol = check_mark(passed)
+    return f"  {symbol} {label}: {value}"
 
 
 class APIKeys:
@@ -92,6 +101,66 @@ class ComicFormat:
     def __repr__(self):
         return f"ComicFormat(path={self.path}, webp={self.webp}, jpg={self.jpg}, png={self.png})"
 
+import re
+from pathlib import Path
+
+def has_valid_filename(comic_path: str) -> bool:
+    """
+    Strict filename check:
+    'Series Vol.YYYY - #NNN.cbz'
+    e.g. 'Iron Man Vol.2020 - #002.cbz'
+    """
+    filename = Path(comic_path).name  # include extension for debug
+    stem = Path(comic_path).stem      # name without extension
+
+    # Pattern on STEM only: "Series Vol.YYYY - #NNN"
+    pattern = r'^.+? Vol\.\d{4} - #\d{3}$'
+    m = re.match(pattern, stem)
+
+    # TEMP DEBUG: show what we are checking
+    print(f"[FNAME DEBUG] name='{filename}' stem='{stem}' match={bool(m)}")
+
+    return bool(m)
+
+def has_valid_filename(comic_path: str) -> bool:
+    """
+    Check if the filename follows a reasonable comic naming convention.
+    
+    Expected patterns (case-insensitive):
+    - "Series Name Vol.YYYY - #NNN.cbz"
+    - "Series Name (YYYY) - #NNN.cbz"
+    - "Series Name #NNN (YYYY).cbz"
+    - etc.
+    
+    Returns True if filename looks valid, False otherwise.
+    """
+    filename = Path(comic_path).stem  # Remove .cbz/.cbr extension
+    
+    # Pattern: should contain at least:
+    # - Some text (series name)
+    # - A 4-digit year OR "Vol." followed by year
+    # - A number (issue number) with # or without
+    
+    # Check for year (4 digits)
+    has_year = bool(re.search(r'\b(19|20)\d{2}\b', filename))
+    
+    # Check for issue number patterns:
+    # - "#123" or "# 123"
+    # - "123 (2023)" at end
+    # - "- 123" or "Vol 123"
+    has_issue_number = bool(re.search(r'(#\s*\d+|\b\d{1,4}\s*\(|\-\s*\d{3,4})', filename))
+    
+    # Filename should have both year and issue number
+    # Also reject files with common "bad" patterns:
+    bad_patterns = [
+        r'\(\d{4}\)\s*\(\d{4}\)',  # Double years like (2023) (2024)
+        r'^[A-Z]{2,}\s+\d+\s+\(',   # All-caps short names like "TF 001 (2023)"
+        r'\(Digital\)',             # Raw digital tags without proper series name
+    ]
+    
+    has_bad_pattern = any(re.search(pattern, filename, re.IGNORECASE) for pattern in bad_patterns)
+    
+    return has_year and has_issue_number and not has_bad_pattern
 
 def get_comic_format(comic_path: str) -> ComicFormat:
     """
@@ -105,7 +174,7 @@ def get_comic_format(comic_path: str) -> ComicFormat:
         
     Example:
         format_info = get_comic_format("/path/to/comic.cbz")
-        if format_info.need_conversion:
+        if format_info.eed_conversion:
             print("Comic needs conversion")
     """
     try:
@@ -291,116 +360,300 @@ def get_comic_vine_info(id: str, type: str) -> Optional[Dict[str, Any]]:
             print(f"Error fetching ComicVine info: {e}")
         return None
 
+def needs_scraping(
+    path: str,
+    strict: bool = False,
+    check_filenames: bool = False,
+    verbose: bool = False,
+) -> list[str]:
+    """
+    Check if a comic file needs scraping.
+    Returns a list of reasons (empty if no scraping needed).
+    """
+    reasons: list[str] = []
 
-def needs_scraping(comic_path: str, strict: bool = True) -> List[str]:
-    """
-    Determine if a CBZ 'needs scraping', i.e. has missing or weak ComicInfo.
-    Returns a list of reasons. If list is empty, file looks OK.
-    """
-    reasons: List[str] = []
-    path = Path(comic_path)
-    
-    if not path.is_file() or path.suffix.lower() != ".cbz":
-        reasons.append("not a CBZ file")
-        return reasons
-    
+    def status_line(check: str, status: str, passed: bool) -> str:
+        symbol = Colors.GREEN + "✓" if passed else Colors.RED + "✗"
+        return f"  {symbol} {check}: {status}{Colors.RESET}"
+
+    if verbose:
+        print(
+            f"\n{Colors.BLUE}[CHECKING]{Colors.RESET} {os.path.basename(path)}",
+            file=sys.stderr,
+        )
+
+    # ---------- (A) Optional: filename check ----------
+    if check_filenames:
+        base = os.path.basename(path)
+        is_standard = bool(
+            re.search(r"\(\d{4}\)", base) and re.search(r"#\d+", base)
+        )
+
+        if verbose:
+            print(
+                status_line(
+                    "Filename format",
+                    "standard" if is_standard else "non-standard",
+                    is_standard,
+                ),
+                file=sys.stderr,
+            )
+
+        if strict and not is_standard:
+            reasons.append("non-standard filename")
+
+    # ---------- (B) Open comic ----------
     try:
-        with zipfile.ZipFile(path, 'r') as z:
-            if "ComicInfo.xml" not in z.namelist():
-                reasons.append("no ComicInfo.xml")
-                return reasons
-            
-            data = z.read("ComicInfo.xml")
-            xml = ET.fromstring(data)
-            
-            series = (xml.findtext("Series") or "").strip()
-            number = (xml.findtext("Number") or "").strip()
-            year = (xml.findtext("Year") or "").strip()
-            publisher = (xml.findtext("Publisher") or "").strip()
-            title = (xml.findtext("Title") or "").strip()
-            
-            if not series:
-                reasons.append("missing Series")
-            if not number:
-                reasons.append("missing Number")
-            if not year:
-                reasons.append("missing Year")
-            
-            if strict:
-                if not publisher:
-                    reasons.append("missing Publisher")
-                if not title:
-                    reasons.append("missing Title")
-                    
+        comic = Comic(path)
     except Exception as e:
-        reasons.append(f"error reading ComicInfo.xml: {e}")
-    
+        reasons.append(f"cannot open archive: {e}")
+        if verbose:
+            print(
+                f"  {Colors.RED}✗ ERROR opening archive: {e}{Colors.RESET}",
+                file=sys.stderr,
+            )
+            print(
+                f"  {Colors.RED}✗ NEEDS SCRAPING{Colors.RESET}: {', '.join(reasons)}",
+                file=sys.stderr,
+            )
+        return reasons
+
+    # ---------- (C) Check presence of ComicInfo ----------
+    has_comicinfo = comic.has_metadata(MetadataFormat.COMIC_INFO)
+    if verbose:
+        print(
+            status_line(
+                "ComicInfo.xml",
+                "present" if has_comicinfo else "MISSING",
+                has_comicinfo,
+            ),
+            file=sys.stderr,
+        )
+
+    if not has_comicinfo:
+        reasons.append("no ComicInfo.xml")
+        if verbose:
+            print(
+                f"  {Colors.RED}✗ NEEDS SCRAPING{Colors.RESET}: {', '.join(reasons)}",
+                file=sys.stderr,
+            )
+        return reasons
+
+    # ---------- (D) Read ComicInfo (may return empty object on error) ----------
+    # Suppress Darkseid's verbose error output
+    metadata = comic.read_metadata(MetadataFormat.COMIC_INFO)
+
+
+    # ---------- (E) Check required fields ----------
+    try:
+        # Extract values from Darkseid objects properly
+        series_obj = getattr(metadata, "series", None)
+        series = series_obj.name if series_obj and hasattr(series_obj, "name") else ""
+        
+        # Darkseid uses 'issue' not 'number'
+        issue = getattr(metadata, "issue", None)
+        number = str(issue) if issue is not None else ""
+        
+        # Year comes from cover_date
+        cover_date = getattr(metadata, "cover_date", None)
+        if cover_date and hasattr(cover_date, "year"):
+            year = str(cover_date.year)
+        else:
+            year = ""
+        
+        publisher_obj = getattr(metadata, "publisher", None)
+        publisher = publisher_obj.name if publisher_obj and hasattr(publisher_obj, "name") else ""
+        
+        # Title might be in 'stories' list
+        stories = getattr(metadata, "stories", [])
+        title = stories[0] if stories else ""
+
+        # If ALL critical fields are empty, metadata is broken/unreadable
+        if not any([series, number, year]):
+            reasons.append("ComicInfo.xml unreadable or all fields empty")
+            if verbose:
+                print(
+                    status_line(
+                        "ComicInfo.xml",
+                        "BROKEN / all fields empty",
+                        False,
+                    ),
+                    file=sys.stderr,
+                )
+                print(
+                    f"  {Colors.RED}✗ NEEDS SCRAPING{Colors.RESET}: {', '.join(reasons)}",
+                    file=sys.stderr,
+                )
+            return reasons
+
+        checks = [
+            ("Series", series),
+            ("Number", number),
+            ("Year", year),
+            ("Publisher", publisher),
+            ("Title", title),
+        ]
+
+        for field_name, value in checks:
+            has_value = bool(value)
+            if verbose:
+                print(
+                    status_line(
+                        field_name,
+                        f"'{value}'" if has_value else "EMPTY",
+                        has_value,
+                    ),
+                    file=sys.stderr,
+                )
+            if not has_value:
+                reasons.append(f"missing {field_name.lower()}")
+
+    except Exception as e:
+        reasons.append(f"metadata error: {e}")
+        if verbose:
+            print(
+                f"  {Colors.RED}✗ ERROR: {e}{Colors.RESET}",
+                file=sys.stderr,
+                )
+
+    # ---------- (F) Final verdict ----------
+    if verbose:
+        if reasons:
+            print(
+                f"  {Colors.RED}✗ NEEDS SCRAPING{Colors.RESET}: {', '.join(reasons)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  {Colors.GREEN}✓ OK{Colors.RESET} - no scraping needed",
+                file=sys.stderr,
+            )
+
     return reasons
 
+def repair_archive(path: str, dry_run: bool = False, verbose: bool = False) -> bool:
+    """
+    Repair non-standard CBZ archive structure by flattening all files to root level.
+    Returns True if repairs were made, False otherwise.
+    """
+    import zipfile
+    import tempfile
+    import shutil
+    
+    if verbose:
+        print(f"\n{Colors.BLUE}[REPAIRING]{Colors.RESET} {os.path.basename(path)}", file=sys.stderr)
+    
+    try:
+        with zipfile.ZipFile(path, 'r') as zf:
+            file_list = zf.namelist()
+            
+            # Check if any files are in subfolders
+            files_in_subfolders = [f for f in file_list if '/' in f and not f.endswith('/')]
+            
+            if not files_in_subfolders:
+                if verbose:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Archive structure is already correct", file=sys.stderr)
+                return False
+            
+            if verbose:
+                print(f"  {Colors.YELLOW}⚠{Colors.RESET} Found {len(files_in_subfolders)} files in subfolders", file=sys.stderr)
+            
+            if dry_run:
+                print(f"  {Colors.BLUE}[DRY RUN]{Colors.RESET} Would flatten {len(files_in_subfolders)} files to root", file=sys.stderr)
+                for f in files_in_subfolders[:5]:  # Show first 5
+                    new_name = os.path.basename(f)
+                    print(f"    {f} → {new_name}", file=sys.stderr)
+                if len(files_in_subfolders) > 5:
+                    print(f"    ... and {len(files_in_subfolders) - 5} more", file=sys.stderr)
+                return True
+            
+            # Create temporary file
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.cbz')
+            os.close(temp_fd)
+            
+            try:
+                with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as new_zf:
+                    for file_name in file_list:
+                        # Skip directories
+                        if file_name.endswith('/'):
+                            continue
+                        
+                        # Get just the filename (no path)
+                        new_name = os.path.basename(file_name)
+                        
+                        # Read from old archive and write to new with flattened name
+                        data = zf.read(file_name)
+                        new_zf.writestr(new_name, data)
+                        
+                        if verbose and '/' in file_name:
+                            print(f"    {file_name} → {new_name}", file=sys.stderr)
+                
+                # Replace original with repaired version
+                shutil.move(temp_path, path)
+                
+                if verbose:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Archive repaired successfully", file=sys.stderr)
+                
+                return True
+                
+            except Exception as e:
+                # Clean up temp file on error
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+                
+    except Exception as e:
+        if verbose:
+            print(f"  {Colors.RED}✗ ERROR:{Colors.RESET} {e}", file=sys.stderr)
+        return False
 
 def needs_normalize(comic_path: str, start_years: Optional[Dict[tuple, int]] = None) -> List[str]:
     """
-    Determine if a CBZ needs normalization (Volume/AlternateSeries fixes).
-    Returns a list of reasons. If list is empty, file looks OK.
-    
-    Args:
-        comic_path: Path to the CBZ file
-        start_years: Optional dict of (series, publisher) -> start_year mappings
-                     If not provided, we can't check Volume correctness
+    Determine if a CBZ needs normalization using Darkseid.
     """
     reasons: List[str] = []
     path = Path(comic_path)
-    
+
     if not path.is_file() or path.suffix.lower() != ".cbz":
         reasons.append("not a CBZ file")
         return reasons
-    
+
     try:
-        with zipfile.ZipFile(path, 'r') as z:
-            ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
-            if not ci_name:
-                reasons.append("no ComicInfo.xml")
-                return reasons
-            
-            data = z.read(ci_name)
-            xml = ET.fromstring(data)
-            
-            def get_text(tag):
-                for child in xml:
-                    if child.tag.lower() == tag.lower():
-                        return (child.text or "").strip()
-                return ""
-            
-            series = get_text("Series")
-            publisher = get_text("Publisher")
-            year = get_text("Year")
-            volume = get_text("Volume")
-            story_arc = get_text("StoryArc")
-            if not story_arc:
-                story_arc = get_text("StoryArcTitle")
-            alt_series = get_text("AlternateSeries")
-            
-            # Check 1: Volume missing
-            if not volume:
-                reasons.append("missing Volume")
-            
-            # Check 2: Volume incorrect (if we have start_years data)
-            elif start_years and series and year:
-                key = (series, publisher)
-                if key in start_years:
-                    expected_vol = str(start_years[key])
-                    if volume != expected_vol:
-                        reasons.append(f"Volume is '{volume}', should be '{expected_vol}'")
-            
-            # Check 3: StoryArc exists but AlternateSeries doesn't
-            if story_arc and not alt_series:
-                reasons.append("has StoryArc but missing AlternateSeries")
+        comic = Comic(str(path))
+        
+        if not comic.has_cix():
+            reasons.append("no ComicInfo.xml")
+            return reasons
+        
+        metadata = comic.read_cix()
+        
+        series = (metadata.series or "").strip()
+        publisher = (metadata.publisher or "").strip()
+        year = str(metadata.year or "").strip()
+        volume = str(metadata.volume or "").strip() if metadata.volume else ""
+        story_arc = (metadata.story_arc or "").strip()
+        alt_series = (metadata.alternate_series or "").strip()
+        
+        # Check 1: Volume missing
+        if not volume:
+            reasons.append("missing Volume")
+        
+        # Check 2: Volume incorrect (if we have start_years data)
+        elif start_years and series and year:
+            key = (series, publisher)
+            if key in start_years:
+                expected_vol = str(start_years[key])
+                if volume != expected_vol:
+                    reasons.append(f"Volume is '{volume}', should be '{expected_vol}'")
+        
+        # Check 3: StoryArc exists but AlternateSeries doesn't
+        if story_arc and not alt_series:
+            reasons.append("has StoryArc but missing AlternateSeries")
                     
     except Exception as e:
-        reasons.append(f"error reading ComicInfo.xml: {e}")
-    
-    return reasons
+        reasons.append(f"error reading comic: {e}")
 
+    return reasons
 
 def find_files_needing_normalize(paths: List[str],
                                   output_format: str = "console",
@@ -501,14 +754,25 @@ def find_files_needing_normalize(paths: List[str],
     return results
 
 
-def find_files_needing_scraping(paths: List[str], strict: bool = True,
-                                output_format: str = "console",
-                                output_file: Optional[str] = None) -> List[Path]:
+def find_files_needing_scraping(
+    paths: List[str],
+    strict: bool = True,
+    check_filenames: bool = False,
+    output_format: str = "console",
+    output_file: Optional[str] = None
+) -> int:
     """
     Walk given files/dirs and return CBZ/CBR files that need scraping.
+    
+    Returns:
+        Exit code: 0 if no files need scraping, 1 if files need scraping
     """
     results: List[Path] = []
     results_with_reasons: List[Dict[str, Any]] = []
+    total_checked = 0
+    
+    # ALWAYS show per-file checks (to stderr)
+    verbose = True
 
     for p in paths:
         pth = Path(p)
@@ -517,25 +781,23 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
                 if f.is_file() and f.suffix.lower() in (".cbz", ".cbr"):
                     if "#recycle" in str(f):
                         continue
-                    reasons = needs_scraping(str(f), strict=strict)
+                    total_checked += 1
+                    reasons = needs_scraping(str(f), strict=strict, check_filenames=check_filenames, verbose=verbose)
                     if reasons:
                         results.append(f)
                         results_with_reasons.append({
                             "path": str(f),
                             "reasons": reasons
                         })
-                        if output_format == "console":
-                            print(f"[NEEDS SCRAPE] {f} -> {', '.join(reasons)}")
         elif pth.is_file() and pth.suffix.lower() in (".cbz", ".cbr"):
-            reasons = needs_scraping(str(pth), strict=strict)
+            total_checked += 1
+            reasons = needs_scraping(str(pth), strict=strict, check_filenames=check_filenames, verbose=verbose)
             if reasons:
                 results.append(pth)
                 results_with_reasons.append({
                     "path": str(pth),
                     "reasons": reasons
                 })
-                if output_format == "console":
-                    print(f"[NEEDS SCRAPE] {pth} -> {', '.join(reasons)}")
 
     # Handle output formats
     if output_format == "json":
@@ -548,29 +810,43 @@ def find_files_needing_scraping(paths: List[str], strict: bool = True,
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(json_output)
-            print(f"JSON output written to: {output_file}")
+            print(f"{Colors.BLUE}ℹ{Colors.RESET} JSON output written to: {output_file}", file=sys.stderr)
         else:
             print(json_output)
     
     elif output_format == "list":
-        list_output = "\n".join(str(p) for p in results)
+        # Use absolute paths
+        list_output = "\n".join(str(p.resolve()) for p in results)
         
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(list_output)
-            print(f"File list written to: {output_file}")
+            print(f"{Colors.BLUE}ℹ{Colors.RESET} File list written to: {output_file}", file=sys.stderr)
         else:
+            # Print to stdout (for piping)
             print(list_output)
     
-    return results
+    elif output_format == "console":
+        # Summary
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"{Colors.BOLD}SCAN SUMMARY{Colors.RESET}", file=sys.stderr)
+        print(f"{'='*60}", file=sys.stderr)
+        print(f"Total files checked: {total_checked}", file=sys.stderr)
+        
+        if results:
+            print(f"{Colors.RED}✗ {len(results)} file(s) need scraping{Colors.RESET}", file=sys.stderr)
+        else:
+            print(f"{Colors.GREEN}✓ All files OK - no scraping needed{Colors.RESET}", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
+
+    return 1 if results else 0
 
 
 def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: bool = False):
     """
-    Normalizes ComicInfo metadata.
-    - Always ensures <Volume> exists and is set to the start year (per Series+Publisher run).
-    - Sets <AlternateSeries> from StoryArc/StoryArcTitle if present and AlternateSeries is empty.
-    Prints a per-file summary of what changed.
+    Normalizes ComicInfo metadata using Darkseid.
+    - Always ensures Volume exists and is set to the start year.
+    - Sets AlternateSeries from StoryArc if present and AlternateSeries is empty.
     """
     if dry_run:
         print("[DRY RUN MODE] No files will be modified\n")
@@ -590,48 +866,37 @@ def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: 
             print(f"[PASS1] {path.name}")
 
         try:
-            with zipfile.ZipFile(path, "r") as z:
-                ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
-                if not ci_name:
-                    if verbose:
-                        print("  No ComicInfo.xml found\n")
-                    continue
-
+            comic = Comic(str(path))
+            if not comic.has_cix():
                 if verbose:
-                    print(f"  Found: {ci_name}")
+                    print("  No ComicInfo.xml found\n")
+                continue
 
-                root = ET.fromstring(z.read(ci_name))
+            metadata = comic.read_cix()
+            series = (metadata.series or "").strip()
+            publisher = (metadata.publisher or "").strip()
+            year_text = str(metadata.year or "").strip()
 
-                def get_text(tag):
-                    for child in root:
-                        if child.tag.lower() == tag.lower():
-                            return (child.text or "").strip()
-                    return ""
+            if verbose:
+                print(f"  Series='{series}', Publisher='{publisher}', Year='{year_text}'")
 
-                series = get_text("Series")
-                publisher = get_text("Publisher")
-                year_text = get_text("Year")
-
+            if not series or not year_text:
                 if verbose:
-                    print(f"  Series='{series}', Publisher='{publisher}', Year='{year_text}'")
+                    print("  Missing Series or Year, skipping\n")
+                continue
 
-                if not series or not year_text:
-                    if verbose:
-                        print("  Missing Series or Year, skipping\n")
-                    continue
-
-                m = re.search(r"(\d{4})", year_text)
-                if not m:
-                    if verbose:
-                        print("  No 4-digit year found, skipping\n")
-                    continue
-
-                year = int(m.group(1))
-                key = (series, publisher)
-                runs.setdefault(key, []).append(year)
-
+            m = re.search(r"(\d{4})", year_text)
+            if not m:
                 if verbose:
-                    print(f"  Added: {key} -> {year}\n")
+                    print("  No 4-digit year found, skipping\n")
+                continue
+
+            year = int(m.group(1))
+            key = (series, publisher)
+            runs.setdefault(key, []).append(year)
+
+            if verbose:
+                print(f"  Added: {key} -> {year}\n")
 
         except Exception as e:
             print(f"[WARN] {path.name}: {e}")
@@ -660,124 +925,70 @@ def normalize_comic_metadata(comics: List[str], dry_run: bool = False, verbose: 
             print(f"[PASS2] {path.name}")
 
         try:
-            with zipfile.ZipFile(path, "r") as z:
-                ci_name = next((n for n in z.namelist() if n.lower().endswith("comicinfo.xml")), None)
-                if not ci_name:
-                    if verbose:
-                        print("  No ComicInfo.xml\n")
-                    continue
-
+            comic = Comic(str(path))
+            if not comic.has_cix():
                 if verbose:
-                    print(f"  Reading: {ci_name}")
+                    print("  No ComicInfo.xml\n")
+                continue
 
-                data = z.read(ci_name)
-                root = ET.fromstring(data)
+            metadata = comic.read_cix()
+            
+            series = (metadata.series or "").strip()
+            publisher = (metadata.publisher or "").strip()
+            key = (series, publisher)
 
-                def get_el(tag):
-                    for child in root:
-                        if child.tag.lower() == tag.lower():
-                            return child
-                    return None
+            if verbose:
+                print(f"  Key: {key}")
 
-                series_el = get_el("Series")
-                publisher_el = get_el("Publisher")
-                series = (series_el.text or "").strip() if series_el is not None else ""
-                publisher = (publisher_el.text or "").strip() if publisher_el is not None else ""
-                key = (series, publisher)
-
+            if key not in start_years:
                 if verbose:
-                    print(f"  Key: {key}")
+                    print(f"  Key {key} not in start_years, skipping\n")
+                continue
 
-                if key not in start_years:
-                    if verbose:
-                        print(f"  Key {key} not in start_years, skipping\n")
-                    continue
+            target_year = str(start_years[key])
 
-                target_year = str(start_years[key])
+            # Track old values
+            old_volume = str(metadata.volume or "").strip() if metadata.volume else None
+            old_alt = (metadata.alternate_series or "").strip() if metadata.alternate_series else None
 
-                # --- Track old values for summary ---
-                vol_el = get_el("Volume")
-                old_volume = (vol_el.text or "").strip() if vol_el is not None else None
+            # Set Volume
+            metadata.volume = target_year
 
-                # Ensure <Volume> exists
-                if vol_el is None:
-                    if verbose:
-                        print("  <Volume> missing, creating it")
-                    vol_el = ET.SubElement(root, "Volume")
+            # Set AlternateSeries from StoryArc if needed
+            story_arc = (metadata.story_arc or "").strip()
+            if story_arc and not (metadata.alternate_series or "").strip():
+                metadata.alternate_series = story_arc
 
-                vol_el.text = target_year
+            # Check what changed
+            new_volume = str(metadata.volume or "").strip()
+            new_alt = (metadata.alternate_series or "").strip() if metadata.alternate_series else None
 
-                # --- AlternateSeries from StoryArc/StoryArcTitle ---
-                sa_el = get_el("StoryArc")
-                sat_el = get_el("StoryArcTitle")
-                alt_el = get_el("AlternateSeries")
+            volume_changed = (old_volume != new_volume)
+            alt_changed = (old_alt != new_alt)
 
-                story_arc = (sa_el.text or "").strip() if sa_el is not None else ""
-                if not story_arc:
-                    story_arc = (sat_el.text or "").strip() if sat_el is not None else ""
-
-                old_alt = (alt_el.text or "").strip() if alt_el is not None else None
-
-                if story_arc:
-                    if alt_el is None or not (alt_el.text or "").strip():
-                        if alt_el is None:
-                            alt_el = ET.SubElement(root, "AlternateSeries")
-                        alt_el.text = story_arc
-
-                # Decide if anything actually changed
-                new_volume = vol_el.text.strip() if vol_el is not None and vol_el.text else None
-                new_alt = (alt_el.text or "").strip() if alt_el is not None else None
-
-                volume_changed = (old_volume != new_volume)
-                alt_changed = (old_alt != new_alt)
-
-                if not volume_changed and not alt_changed:
-                    if verbose:
-                        print(f"  No changes needed for {path.name}\n")
-                    continue
-
-                # Print a concise per-file summary (even if not verbose)
-                print(f"[NORMALIZE] {path.name}")
-                if volume_changed:
-                    print(f"  Volume: {old_volume or '<none>'} -> {new_volume}")
-                if alt_changed:
-                    print(f"  AlternateSeries: {old_alt or '<none>'} -> {new_alt}")
-
+            if not volume_changed and not alt_changed:
                 if verbose:
-                    print("\n--- XML PREVIEW (what will be written) ---")
-                    preview = ET.tostring(root, encoding="unicode")
-                    print(preview[:2000])
-                    if len(preview) > 2000:
-                        print("... (truncated)")
-                    print("--- END PREVIEW ---\n")
+                    print(f"  No changes needed for {path.name}\n")
+                continue
 
-                changes += 1
+            # Print summary
+            print(f"[NORMALIZE] {path.name}")
+            if volume_changed:
+                print(f"  Volume: {old_volume or '<none>'} -> {new_volume}")
+            if alt_changed:
+                print(f"  AlternateSeries: {old_alt or '<none>'} -> {new_alt}")
 
-                if dry_run:
-                    print(f"[DRY RUN] Would update {path.name}\n")
-                    continue
+            changes += 1
 
-                # Write back
-                new_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-                tmp = tempfile.NamedTemporaryFile(delete=False)
-                tmp.close()
+            if dry_run:
+                print(f"[DRY RUN] Would update {path.name}\n")
+                continue
 
-                if verbose:
-                    print(f"  Writing to temp: {tmp.name}")
+            # Write back (Darkseid handles the archive rewrite!)
+            comic.write_cix(metadata)
 
-                with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zout:
-                    for item in zin.infolist():
-                        if item.filename == ci_name:
-                            if verbose:
-                                print(f"  Replacing '{item.filename}' in ZIP")
-                            zout.writestr(item.filename, new_xml)
-                        else:
-                            zout.writestr(item, zin.read(item.filename))
-
-                shutil.move(tmp.name, path)
-
-                if verbose:
-                    print(f"  ✓ Updated {path.name}\n")
+            if verbose:
+                print(f"  ✓ Updated {path.name}\n")
 
         except Exception as e:
             print(f"[WARN] {path.name}: {e}")
@@ -1045,6 +1256,7 @@ def run_pipeline(paths: List[str], strict: bool = True, verbose: bool = False):
     files_needing_scraping = find_files_needing_scraping(
         paths, 
         strict=strict,
+        check_filenames=True,
         output_format="console"
     )
     
@@ -1094,6 +1306,101 @@ def run_pipeline(paths: List[str], strict: bool = True, verbose: bool = False):
     
     print("\n✓ Pipeline complete!")
 
+def metron_scrape(paths: List[str], ignore_existing: bool = True, dry_run: bool = False) -> int:
+    """
+    Run MetronTagger on the given files/directories.
+    
+    Returns:
+        Exit code: 0 on success, 1 on error
+    """
+    import shutil
+    
+    # Check if metron-tagger is installed
+    if not shutil.which("metron-tagger"):
+        print(f"{Colors.RED}✗ ERROR{Colors.RESET}: metron-tagger not found in PATH", file=sys.stderr)
+        print("Install it with: pip install metron-tagger", file=sys.stderr)
+        return 1
+    
+    # Collect all CBZ/CBR files
+    files = collect_cbz_from_paths(paths)
+    
+    if not files:
+        print(f"{Colors.YELLOW}⚠{Colors.RESET} No CBZ/CBR files found")
+        return 0
+    
+    print(f"\n{Colors.BOLD}MetronTagger Scraping{Colors.RESET}")
+    print(f"{'='*60}")
+    print(f"Files to process: {len(files)}")
+    
+    if dry_run:
+        print(f"{Colors.CYAN}[DRY-RUN]{Colors.RESET} Would scrape these files:")
+        for f in files:
+            print(f"  - {f}")
+        return 0
+    
+    print(f"{'='*60}\n")
+    
+    success_count = 0
+    skip_count = 0
+    error_count = 0
+    
+    for i, file_path in enumerate(files, 1):
+        path = Path(file_path)
+        print(f"[{i}/{len(files)}] {path.name}")
+        
+        # Check if already has MetronInfo.xml
+        if ignore_existing:
+            try:
+                with zipfile.ZipFile(path, "r") as z:
+                    if "MetronInfo.xml" in z.namelist():
+                        print(f"  {Colors.YELLOW}⊘{Colors.RESET} Skipping (already has MetronInfo.xml)")
+                        skip_count += 1
+                        continue
+            except Exception as e:
+                print(f"  {Colors.RED}✗{Colors.RESET} Error checking file: {e}", file=sys.stderr)
+                error_count += 1
+                continue
+        
+        # Run metron-tagger
+        cmd = ["metron-tagger", "--online", str(path)]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Successfully scraped")
+                success_count += 1
+            else:
+                print(f"  {Colors.RED}✗{Colors.RESET} Failed (exit code {result.returncode})")
+                if result.stderr:
+                    print(f"    Error: {result.stderr.strip()}", file=sys.stderr)
+                error_count += 1
+                
+        except subprocess.TimeoutExpired:
+            print(f"  {Colors.RED}✗{Colors.RESET} Timeout (>60s)", file=sys.stderr)
+            error_count += 1
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}⚠{Colors.RESET} Interrupted by user")
+            raise
+        except Exception as e:
+            print(f"  {Colors.RED}✗{Colors.RESET} Error: {e}", file=sys.stderr)
+            error_count += 1
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"{Colors.BOLD}SCRAPING SUMMARY{Colors.RESET}")
+    print(f"{'='*60}")
+    print(f"{Colors.GREEN}✓{Colors.RESET} Success: {success_count}")
+    print(f"{Colors.YELLOW}⊘{Colors.RESET} Skipped: {skip_count}")
+    print(f"{Colors.RED}✗{Colors.RESET} Errors: {error_count}")
+    print(f"{'='*60}\n")
+    
+    return 0 if error_count == 0 else 1
 
 if __name__ == "__main__":
     import argparse
@@ -1114,22 +1421,34 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # ---------- scan ----------
-    scan = sub.add_parser("scan", help="Find comics needing scraping")
-    scan.add_argument("paths", nargs="+", help="Files or directories to scan")
-    scan.add_argument(
+    scan_parser = sub.add_parser(
+        "scan",
+        help="Scan for comics needing metadata scraping"
+    )
+    scan_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Paths to scan (files or directories)"
+    )
+    scan_parser.add_argument(
         "--strict",
         action="store_true",
-        help="Also require Publisher + Title to be present",
+        help="Require Publisher and Title fields"
     )
-    scan.add_argument(
+    scan_parser.add_argument(
+        "--check-filenames",
+        action="store_true",
+        help="Flag files with non-standard filenames for renaming"
+    )
+    scan_parser.add_argument(
         "--output",
         choices=["console", "json", "list"],
         default="console",
-        help="Output format: console (default), json, or list",
+        help="Output format"
     )
-    scan.add_argument(
+    scan_parser.add_argument(
         "--output-file",
-        help="Write output to file instead of stdout",
+        help="Write output to file instead of stdout"
     )
 
     # ---------- normalize ----------
@@ -1225,7 +1544,43 @@ if __name__ == "__main__":
         action="store_true",
         help="Verbose output",
     )
+    
+    # ---------- metron scraper ----------    
+    metron_parser = sub.add_parser(
+        "metron-scrape",
+        help="Scrape metadata using MetronTagger (non-interactive)"
+    )
+    metron_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Comic files or directories to scrape"
+    )
+    metron_parser.add_argument(
+        "--ignore-existing",
+        action="store_true",
+        help="Skip files that already have MetronInfo.xml"
+    )
+    metron_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be scraped without actually doing it"
+    )
 
+    # Repair command
+    repair_parser = sub.add_parser(
+        "repair",
+        help="Repair non-standard CBZ archive structures (flatten subfolders)",
+    )
+    repair_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Comic file(s) or folder(s) to repair",
+    )
+    repair_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be repaired without making changes",
+    )
     # Parse arguments
     args = parser.parse_args()
 
@@ -1261,13 +1616,13 @@ if __name__ == "__main__":
 
     try:
         if args.cmd == "scan":
-            bad = find_files_needing_scraping(
-                args.paths, 
+            sys.exit(find_files_needing_scraping(
+                args.paths,
                 strict=args.strict,
+                check_filenames=args.check_filenames,
                 output_format=args.output,
                 output_file=args.output_file
-            )
-            
+            ))            
             if args.output == "console":
                 print(f"\n{len(bad)} files need scraping")
             
@@ -1304,6 +1659,29 @@ if __name__ == "__main__":
 
         elif args.cmd == "pipeline":
             run_pipeline(args.paths, strict=args.strict, verbose=args.verbose)
+
+        elif args.cmd == "metron-scrape":
+            sys.exit(metron_scrape(
+                args.paths,
+                ignore_existing=args.ignore_existing,
+                dry_run=args.dry_run
+            ))
+
+
+        elif args.cmd == "repair":
+            files = collect_cbz_from_paths(args.paths)
+            if not files:
+                print("No .cbz files found.", file=sys.stderr)
+                sys.exit(1)
+            
+            print(f"Repairing {len(files)} file(s)...\n")
+            repaired = 0
+            
+            for f in files:
+                if repair_archive(f, dry_run=args.dry_run, verbose=True):
+                    repaired += 1
+            
+            print(f"\n{'[DRY RUN] Would repair' if args.dry_run else 'Repaired'} {repaired}/{len(files)} file(s)")
 
 
     except FileNotFoundError as e:
