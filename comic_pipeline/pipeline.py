@@ -5,9 +5,9 @@ from typing import List
 
 from .scanner import find_files_needing_scraping
 from .normalizer import normalize_comic_metadata, find_files_needing_normalize
-from .converter import convert_to_webp
+from .image_converter import convert_to_webp
 from .repair import repair_archive
-from .metron import metron_scrape
+from .scraper import metron_scrape
 from .utils import Colors, collect_cbz_from_paths
 
 
