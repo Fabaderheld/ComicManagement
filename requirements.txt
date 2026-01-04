@@ -2,3 +2,5 @@ Pillow>=10.0.0
 requests>=2.31.0
 darkseid>=3.0.0
 mokkari>=2.3.0
+rarfile>=4.0
+py7zr>=0.20.0

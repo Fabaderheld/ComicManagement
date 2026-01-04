@@ -6,8 +6,10 @@ This tool provides commands for:
 - Scanning comics for missing metadata
 - Normalizing metadata (Volume, AlternateSeries)
 - Converting images to WebP format
+- Converting archive formats (CBR/CB7 to CBZ)
 - Repairing archive structure
 - Syncing with Kapowarr
+- Scraping metadata from Metron
 - Running the full pipeline
 """
 
@@ -21,6 +23,9 @@ from comic_pipeline import (
     find_files_needing_normalize,
     normalize_comic_metadata,
     convert_to_webp,
+    convert_cbr_to_cbz,
+    convert_cb7_to_cbz,
+    batch_convert_to_cbz,
     repair_archive,
     update_kapowarr_volumes,
     metron_scrape,
@@ -28,7 +33,6 @@ from comic_pipeline import (
     collect_cbz_from_paths,
     Colors
 )
-
 
 def main():
     """Main CLI entry point"""
