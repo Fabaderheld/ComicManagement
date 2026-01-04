@@ -127,24 +127,26 @@ Examples:
                                 help='Comics root path (default: /mnt/comics)')
     kapowarr_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying')
     
-    # metron command
-    metron_parser = sub.add_parser('metron', help='Scrape metadata using Metron API')
-    metron_parser.add_argument('paths', nargs='+', help='Files or directories to scrape')
-    metron_parser.add_argument('--overwrite', action='store_true',
+    # scrape command
+    scrape_parser = sub.add_parser('scrape', help='Scrape metadata using Metron API')
+    scrape_parser.add_argument('paths', nargs='+', help='Files or directories to scrape')
+    scrape_parser.add_argument('--overwrite', action='store_true',
                             help='Overwrite existing metadata fields (default: only fill empty fields)')
-    metron_parser.add_argument('--dry-run', action='store_true',
+    scrape_parser.add_argument('--dry-run', action='store_true',
                             help='Preview what would be scraped without modifying files')
-    metron_parser.add_argument('--verbose', action='store_true',
+    scrape_parser.add_argument('--verbose', action='store_true',
                             help='Enable verbose output')
     
     # pipeline command
     pipeline_parser = sub.add_parser('pipeline', help='Run full processing pipeline')
     pipeline_parser.add_argument('paths', nargs='+', help='Files or directories to process')
-    pipeline_parser.add_argument('--skip-scan', action='store_true', help='Skip scanning step')
-    pipeline_parser.add_argument('--skip-normalize', action='store_true', help='Skip normalization step')
-    pipeline_parser.add_argument('--skip-convert', action='store_true', help='Skip WebP conversion step')
+    pipeline_parser.add_argument('--skip-convert', action='store_true', help='Skip CBR/CB7 conversion step')
     pipeline_parser.add_argument('--skip-repair', action='store_true', help='Skip repair step')
+    pipeline_parser.add_argument('--skip-scan', action='store_true', help='Skip scanning/scraping step')
+    pipeline_parser.add_argument('--skip-normalize', action='store_true', help='Skip normalization step')
+    pipeline_parser.add_argument('--skip-webp', action='store_true', help='Skip WebP conversion step')
     pipeline_parser.add_argument('--dry-run', action='store_true', help='Preview all changes without applying')
+    pipeline_parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     
     # convert command
     convert_parser = sub.add_parser('convert', help='Convert CBR/CB7 files to CBZ')
@@ -235,18 +237,18 @@ Examples:
                 dry_run=args.dry_run
             )
         
-        elif args.cmd == 'metron':
+        elif args.cmd == 'scrape':
             if not args.metron_user or not args.metron_pass:
                 print(f"{Colors.RED}✗{Colors.RESET} Metron username and password required", file=sys.stderr)
                 print("  Set via --metron-user/--metron-pass or METRON_USER/METRON_PASS env vars", file=sys.stderr)
                 sys.exit(1)
             
-            cbz_files = collect_cbz_from_paths(args.paths)
-            if not cbz_files:
-                print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found", file=sys.stderr)
+            comic_files = collect_cbz_from_paths(args.paths, include_cbr=True)  # ✅ Include CBR/CB7
+            if not comic_files:
+                print(f"{Colors.RED}✗{Colors.RESET} No comic files found", file=sys.stderr)
                 sys.exit(1)
             
-            metron_scrape(cbz_files, username=args.metron_user, password=args.metron_pass, 
+            metron_scrape(comic_files, username=args.metron_user, password=args.metron_pass,
                         overwrite=args.overwrite, dry_run=args.dry_run, verbose=args.verbose)
 
         elif args.cmd == 'convert':
@@ -275,10 +277,13 @@ Examples:
         elif args.cmd == 'pipeline':
             run_pipeline(
                 args.paths,
-                skip_scan=args.skip_scan,
-                skip_normalize=args.skip_normalize,
                 skip_convert=args.skip_convert,
                 skip_repair=args.skip_repair,
+                skip_scan=args.skip_scan,
+                skip_normalize=args.skip_normalize,
+                skip_webp=args.skip_webp,
+                metron_user=args.metron_user,
+                metron_pass=args.metron_pass,
                 dry_run=args.dry_run,
                 verbose=args.verbose
             )

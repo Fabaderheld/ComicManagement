@@ -1,39 +1,44 @@
 """Full pipeline orchestration"""
-
 import sys
 from typing import List
-
 from .scanner import find_files_needing_scraping
-from .normalizer import normalize_comic_metadata, find_files_needing_normalize
+from .normalizer import normalize_comic_metadata
 from .image_converter import convert_to_webp
 from .repair import repair_archive
 from .scraper import metron_scrape
+from .archive_converter import batch_convert_to_cbz
 from .utils import Colors, collect_cbz_from_paths
 
 
-def run_pipeline(paths: List[str], 
-                 skip_scan: bool = False,
-                 skip_normalize: bool = False,
+def run_pipeline(paths: List[str],
                  skip_convert: bool = False,
                  skip_repair: bool = False,
+                 skip_scan: bool = False,
+                 skip_normalize: bool = False,
+                 skip_webp: bool = False,
+                 metron_user: str = None,
+                 metron_pass: str = None,
                  dry_run: bool = False,
                  verbose: bool = False):
     """
     Run the full comic processing pipeline.
     
-    Steps:
-    1. Scan for files needing scraping
-    2. Scrape with Metron (if needed)
-    3. Normalize metadata
-    4. Convert to WebP
-    5. Repair archive structure
+    Correct order:
+    1. Convert CBR/CB7 to CBZ
+    2. Repair archive structure (flatten to root)
+    3. Scan and scrape metadata
+    4. Normalize metadata (Volume, AlternateSeries)
+    5. Convert images to WebP
     
     Args:
         paths: List of file or directory paths to process
-        skip_scan: Skip the scanning step
-        skip_normalize: Skip metadata normalization
-        skip_convert: Skip WebP conversion
+        skip_convert: Skip CBR/CB7 to CBZ conversion
         skip_repair: Skip archive repair
+        skip_scan: Skip scanning/scraping step
+        skip_normalize: Skip metadata normalization
+        skip_webp: Skip WebP conversion
+        metron_user: Metron username for scraping
+        metron_pass: Metron password for scraping
         dry_run: Preview changes without making them
         verbose: Enable verbose output
     """
@@ -42,64 +47,42 @@ def run_pipeline(paths: List[str],
     if dry_run:
         print(f"{Colors.YELLOW}[DRY RUN MODE]{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\n")
-    
-    # Collect all CBZ files
-    all_files = collect_cbz_from_paths(paths)
-    
-    if not all_files:
-        print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found in provided paths", file=sys.stderr)
-        sys.exit(1)
-    
-    print(f"Found {len(all_files)} CBZ file(s) to process\n")
-    
-    # Step 1: Scan and Scrape
-    if not skip_scan:
-        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}")
-        print(f"{Colors.BOLD}STEP 1: SCAN & SCRAPE{Colors.RESET}")
-        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
-        
-        exit_code = find_files_needing_scraping(
-            paths, 
-            strict=True, 
-            check_filenames=False,
-            output_format="list",
-            output_file=None
-        )
-        
-        if exit_code == 1:
-            # Files need scraping
-            print(f"\n{Colors.YELLOW}⚠{Colors.RESET} Some files need scraping. Run with metron or perdoo.", file=sys.stderr)
-            if not dry_run:
-                response = input("Continue anyway? [y/N]: ")
-                if response.lower() != 'y':
-                    sys.exit(1)
-        else:
-            print(f"{Colors.GREEN}✓{Colors.RESET} All files have valid metadata\n")
-    
-    # Step 2: Normalize
-    if not skip_normalize:
-        print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
-        print(f"{Colors.BOLD}STEP 2: NORMALIZE METADATA{Colors.RESET}")
-        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
-        
-        normalize_comic_metadata(all_files, dry_run=dry_run, verbose=verbose)
-    
-    # Step 3: Convert to WebP
+
+    # Step 1: Convert CBR/CB7 to CBZ
     if not skip_convert:
-        print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
-        print(f"{Colors.BOLD}STEP 3: CONVERT TO WEBP{Colors.RESET}")
+        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}STEP 1: CONVERT TO CBZ{Colors.RESET}")
         print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
         
-        convert_to_webp(all_files, verbose=verbose, dry_run=dry_run)
-    
-    # Step 4: Repair archives
+        # Find CBR/CB7 files
+        all_files = collect_cbz_from_paths(paths, include_cbr=True)
+        cbr_files = [f for f in all_files if f.endswith(('.cbr', '.cb7'))]
+        
+        if cbr_files:
+            print(f"Found {len(cbr_files)} CBR/CB7 file(s) to convert\n")
+            if not dry_run:
+                successful, failed = batch_convert_to_cbz(cbr_files, delete_original=True, verbose=verbose)
+                print(f"\n{Colors.GREEN}✓{Colors.RESET} Converted {len(successful)} file(s)")
+                if failed:
+                    print(f"{Colors.RED}✗{Colors.RESET} Failed to convert {len(failed)} file(s)")
+            else:
+                print(f"{Colors.BLUE}[DRY RUN]{Colors.RESET} Would convert {len(cbr_files)} file(s)\n")
+        else:
+            print(f"{Colors.GREEN}✓{Colors.RESET} No CBR/CB7 files found, skipping conversion\n")
+
+    # Step 2: Repair archives (flatten structure)
     if not skip_repair:
         print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
-        print(f"{Colors.BOLD}STEP 4: REPAIR ARCHIVES{Colors.RESET}")
+        print(f"{Colors.BOLD}STEP 2: REPAIR ARCHIVES{Colors.RESET}")
         print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
         
+        cbz_files = collect_cbz_from_paths(paths)
+        if not cbz_files:
+            print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found", file=sys.stderr)
+            sys.exit(1)
+        
         repaired = 0
-        for file in all_files:
+        for file in cbz_files:
             if repair_archive(file, dry_run=dry_run, verbose=verbose):
                 repaired += 1
         
@@ -107,7 +90,64 @@ def run_pipeline(paths: List[str],
             print(f"\n{Colors.BLUE}[DRY RUN]{Colors.RESET} Would repair {repaired} file(s)")
         else:
             print(f"\n{Colors.GREEN}✓{Colors.RESET} Repaired {repaired} file(s)")
+
+    # Collect CBZ files for remaining steps
+    cbz_files = collect_cbz_from_paths(paths)
+    if not cbz_files:
+        print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found in provided paths", file=sys.stderr)
+        sys.exit(1)
     
+    print(f"\nProcessing {len(cbz_files)} CBZ file(s)\n")
+
+    # Step 3: Scan and Scrape
+    if not skip_scan:
+        print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}STEP 3: SCAN & SCRAPE{Colors.RESET}")
+        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
+        
+        exit_code = find_files_needing_scraping(
+            paths,
+            strict=True,
+            check_filenames=False,
+            output_format="console",
+            output_file=None
+        )
+        
+        if exit_code == 1:
+            # Files need scraping
+            print(f"\n{Colors.YELLOW}⚠{Colors.RESET} Some files need scraping.")
+            
+            if metron_user and metron_pass:
+                print(f"{Colors.BLUE}[SCRAPING]{Colors.RESET} Scraping with Metron...\n")
+                if not dry_run:
+                    metron_scrape(cbz_files, username=metron_user, password=metron_pass,
+                                overwrite=False, dry_run=False, verbose=verbose)
+                else:
+                    print(f"{Colors.BLUE}[DRY RUN]{Colors.RESET} Would scrape {len(cbz_files)} file(s)\n")
+            else:
+                print(f"{Colors.YELLOW}⚠{Colors.RESET} No Metron credentials provided. Skipping scraping.")
+                print("  Provide --metron-user and --metron-pass to enable scraping.")
+                if not dry_run:
+                    response = input("\nContinue without scraping? [y/N]: ")
+                    if response.lower() != 'y':
+                        sys.exit(1)
+        else:
+            print(f"{Colors.GREEN}✓{Colors.RESET} All files have valid metadata\n")
+
+    # Step 4: Normalize metadata
+    if not skip_normalize:
+        print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}STEP 4: NORMALIZE METADATA{Colors.RESET}")
+        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
+        normalize_comic_metadata(cbz_files, dry_run=dry_run, verbose=verbose)
+
+    # Step 5: Convert to WebP
+    if not skip_webp:
+        print(f"\n{Colors.CYAN}{'─'*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}STEP 5: CONVERT TO WEBP{Colors.RESET}")
+        print(f"{Colors.CYAN}{'─'*60}{Colors.RESET}\n")
+        convert_to_webp(cbz_files, verbose=verbose, dry_run=dry_run)
+
     # Final summary
     print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
     print(f"{Colors.BOLD}PIPELINE COMPLETE{Colors.RESET}")

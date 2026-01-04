@@ -1,9 +1,53 @@
 """Utility functions and classes"""
-
 import sys
+import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import xml.etree.ElementTree as ET
+
+
+class ComicInfo:
+    """Represents ComicInfo.xml metadata"""
+    def __init__(self, xml_root: ET.Element):
+        self.xml = xml_root
+    
+    def get(self, tag: str, default: str = "") -> str:
+        """Get tag value, case-insensitive"""
+        for elem in self.xml:
+            if elem.tag.lower() == tag.lower():
+                return elem.text or default
+        return default
+    
+    def set(self, tag: str, value: str):
+        """Set tag value, case-insensitive"""
+        for elem in self.xml:
+            if elem.tag.lower() == tag.lower():
+                elem.text = value
+                return
+        # Tag doesn't exist, create it
+        ET.SubElement(self.xml, tag).text = value
+    
+    def has(self, tag: str) -> bool:
+        """Check if tag exists"""
+        for elem in self.xml:
+            if elem.tag.lower() == tag.lower():
+                return True
+        return False
+
+
+class APIKeys:
+    """Global API key storage"""
+    comic_vine_api_key: Optional[str] = None
+    kapowarr_api_key: Optional[str] = None
+    
+    @classmethod
+    def set_api_keys(cls, comic_vine_api_key: Optional[str] = None, 
+                     kapowarr_api_key: Optional[str] = None):
+        """Set API keys"""
+        if comic_vine_api_key:
+            cls.comic_vine_api_key = comic_vine_api_key
+        if kapowarr_api_key:
+            cls.kapowarr_api_key = kapowarr_api_key
 
 
 class Colors:

@@ -277,125 +277,99 @@ class MetronScraper:
                     setattr(existing, field, new_value)
         
         return existing, changes
-    
-    def scrape_file(self, cbz_path: str, overwrite: bool = False, 
-                dry_run: bool = False, verbose: bool = False) -> bool:
+
+    def scrape_file(self, cbz_path: str, overwrite: bool = False,
+                    dry_run: bool = False, verbose: bool = False) -> bool:
         """
-        Scrape metadata for a single CBZ file.
+        Scrape metadata for a single CBZ file using darkseid.
         
         Args:
             cbz_path: Path to CBZ file
             overwrite: If True, overwrite existing metadata
             dry_run: If True, don't modify the file
             verbose: Enable verbose output
-            
+        
         Returns:
             True if file was modified (or would be in dry-run), False otherwise
         """
-        path = Path(cbz_path)
+        from darkseid.comic import Comic
+        from darkseid.metadata import Metadata
         
+        path = Path(cbz_path)
         if verbose:
             print(f"\n{Colors.BLUE}[SCRAPING]{Colors.RESET} {path.name}", file=sys.stderr)
         
         try:
-            # Use the same approach as normalize_comic_metadata
-            import zipfile
-            import xml.etree.ElementTree as ET
+            # Load comic using darkseid
+            comic = Comic(cbz_path)
             
-            with zipfile.ZipFile(cbz_path, 'r') as zf:
-                if 'ComicInfo.xml' not in zf.namelist():
-                    if verbose:
-                        print(f"  {Colors.YELLOW}⚠{Colors.RESET} No ComicInfo.xml found", 
-                            file=sys.stderr)
-                    # For now, skip files without ComicInfo.xml
-                    # TODO: Could create new ComicInfo.xml from filename
-                    return False
-                
-                xml_data = zf.read('ComicInfo.xml')
-                xml = ET.fromstring(xml_data)
+            # Get existing metadata - specify ComicInfo format
+            existing_md = comic.read_metadata(ComicInfo)  # ← Add ComicInfo parameter
+            if existing_md is None:
+                existing_md = Metadata()
+                if verbose:
+                    print(f"  {Colors.YELLOW}⚠{Colors.RESET} No ComicInfo.xml, will create new one", file=sys.stderr)
+            else:
+                if verbose:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Found existing ComicInfo.xml", file=sys.stderr)
             
-            # Extract search parameters
-            series = xml.findtext('Series', '').strip()
-            number = xml.findtext('Number', '').strip()
-            year_text = xml.findtext('Year', '').strip()
+            # Get search parameters
+            series = existing_md.series or ""
+            number = existing_md.issue or ""
+            year = existing_md.year
             
-            year = None
-            if year_text:
-                try:
-                    year = int(year_text)
-                except ValueError:
-                    pass
+            if verbose and (series or number or year):
+                print(f"  Existing metadata: Series='{series}', Issue='{number}', Year='{year}'", file=sys.stderr)
             
-            if verbose:
-                print(f"  Existing metadata: Series='{series}', Issue='{number}', Year='{year}'", 
-                    file=sys.stderr)
-            
-            # If metadata is missing, try to parse from filename
+            # Parse filename if metadata is missing
             if not series or not number:
                 if verbose:
-                    print(f"  {Colors.YELLOW}⚠{Colors.RESET} Missing metadata, parsing filename...", 
-                        file=sys.stderr)
+                    print(f"  {Colors.YELLOW}⚠{Colors.RESET} Missing metadata, parsing filename...", file=sys.stderr)
                 
-                filename = path.stem  # Remove .cbz extension
+                filename = path.stem
                 parsed_series, parsed_number, parsed_year = parse_filename(filename)
                 
                 if parsed_series and parsed_number:
                     series = series or parsed_series
                     number = number or parsed_number
                     year = year or parsed_year
-                    
                     if verbose:
-                        print(f"  {Colors.GREEN}✓{Colors.RESET} Parsed: {series} #{number}" + 
+                        print(f"  {Colors.GREEN}✓{Colors.RESET} Parsed: {series} #{number}" +
                             (f" ({year})" if year else ""), file=sys.stderr)
                 else:
-                    print(f"  {Colors.RED}✗{Colors.RESET} Could not parse series/number from filename", 
-                        file=sys.stderr)
+                    print(f"  {Colors.RED}✗{Colors.RESET} Could not parse series/number from filename", file=sys.stderr)
                     return False
             
+            # Use filename year if ComicInfo year is missing
+            if not year:
+                _, _, parsed_year = parse_filename(path.stem)
+                if parsed_year:
+                    year = parsed_year
+                    if verbose:
+                        print(f"  Using year from filename: {year}", file=sys.stderr)
+            
             if not series or not number:
-                print(f"  {Colors.RED}✗{Colors.RESET} Missing Series or Number", 
-                    file=sys.stderr)
+                print(f"  {Colors.RED}✗{Colors.RESET} Missing Series or Number", file=sys.stderr)
                 return False
             
             if verbose:
-                print(f"  Searching: {series} #{number}" + (f" ({year})" if year else ""), 
-                    file=sys.stderr)
+                print(f"  Searching Metron: {series} #{number}" + (f" ({year})" if year else ""), file=sys.stderr)
             
             # Search Metron
-            issue = self.search_issue(series, number, year)
+            issue = self.search_issue(series, number, year, verbose=verbose)
             
             if not issue:
                 print(f"  {Colors.RED}✗{Colors.RESET} Not found on Metron", file=sys.stderr)
                 return False
             
             if verbose:
-                print(f"  {Colors.GREEN}✓{Colors.RESET} Found: {issue.series.name} #{issue.number}", 
-                    file=sys.stderr)
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Found: {issue.series.name} #{issue.number}", file=sys.stderr)
             
-            # Convert Metron issue to metadata updates
-            updates = self.extract_metadata_from_issue(issue)
+            # Convert Metron issue to Metadata
+            new_md = self.issue_to_metadata(issue)
             
-            # Apply updates to XML and track changes
-            changes = []
-            for tag_name, new_value in updates.items():
-                if not new_value:
-                    continue
-                
-                elem = xml.find(tag_name)
-                if elem is None:
-                    elem = ET.SubElement(xml, tag_name)
-                
-                old_value = elem.text or ""
-                
-                # Only update if overwrite=True or field is empty
-                if overwrite or not old_value.strip():
-                    if old_value != new_value:
-                        changes.append({
-                            'field': tag_name,
-                            'old': old_value if old_value else '(empty)',
-                            'new': new_value
-                        })
-                        elem.text = new_value
+            # Merge metadata
+            merged_md, changes = self.merge_metadata(existing_md, new_md, overwrite=overwrite)
             
             if not changes:
                 if verbose:
@@ -403,38 +377,25 @@ class MetronScraper:
                 return False
             
             if dry_run:
-                print(f"  {Colors.BLUE}[DRY RUN]{Colors.RESET} Would update {len(changes)} field(s):", 
-                    file=sys.stderr)
+                print(f"  {Colors.BLUE}[DRY RUN]{Colors.RESET} Would update {len(changes)} field(s):", file=sys.stderr)
                 for change in changes:
-                    old_display = change['old'][:50] + '...' if len(change['old']) > 50 else change['old']
-                    new_display = change['new'][:50] + '...' if len(change['new']) > 50 else change['new']
+                    old_display = str(change['old'])[:50] + '...' if len(str(change['old'])) > 50 else str(change['old'])
+                    new_display = str(change['new'])[:50] + '...' if len(str(change['new'])) > 50 else str(change['new'])
                     print(f"    {Colors.YELLOW}{change['field']}{Colors.RESET}: "
                         f"{Colors.RED}{old_display}{Colors.RESET} → "
-                        f"{Colors.GREEN}{new_display}{Colors.RESET}", 
-                        file=sys.stderr)
+                        f"{Colors.GREEN}{new_display}{Colors.RESET}", file=sys.stderr)
                 return True
             
-            # Write back to CBZ (same as normalize_comic_metadata)
-            temp_path = str(path) + '.tmp'
-            with zipfile.ZipFile(cbz_path, 'r') as zf_in:
-                with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zf_out:
-                    for item in zf_in.namelist():
-                        if item == 'ComicInfo.xml':
-                            zf_out.writestr(item, ET.tostring(xml, encoding='utf-8'))
-                        else:
-                            zf_out.writestr(item, zf_in.read(item))
-            
-            import os
-            os.replace(temp_path, cbz_path)
+            # Write metadata using darkseid - specify ComicInfo format
+            comic.write_metadata(merged_md, ComicInfo)  # ← Add ComicInfo parameter
             
             if verbose:
                 print(f"  {Colors.GREEN}✓{Colors.RESET} Updated {len(changes)} field(s):", file=sys.stderr)
                 for change in changes:
-                    old_display = change['old'][:30] + '...' if len(change['old']) > 30 else change['old']
-                    new_display = change['new'][:30] + '...' if len(change['new']) > 30 else change['new']
+                    old_display = str(change['old'])[:30] + '...' if len(str(change['old'])) > 30 else str(change['old'])
+                    new_display = str(change['new'])[:30] + '...' if len(str(change['new'])) > 30 else str(change['new'])
                     print(f"    {Colors.CYAN}{change['field']}{Colors.RESET}: "
-                        f"{old_display} → {new_display}", 
-                        file=sys.stderr)
+                        f"{old_display} → {new_display}", file=sys.stderr)
             
             return True
             
@@ -444,6 +405,130 @@ class MetronScraper:
                 import traceback
                 traceback.print_exc()
             return False
+
+    def issue_to_metadata(self, issue: Any) -> Metadata:
+        """
+        Convert a Metron issue object to Darkseid Metadata.
+        
+        Args:
+            issue: Metron issue object
+        
+        Returns:
+            Metadata object with all available fields populated
+        """
+        from darkseid.metadata import Metadata
+        
+        md = Metadata()
+        
+        # Basic fields
+        if hasattr(issue, 'series') and issue.series:
+            md.series = issue.series.name
+        
+        if hasattr(issue, 'number') and issue.number:
+            md.issue = str(issue.number)
+        
+        if hasattr(issue, 'story_titles') and issue.story_titles:
+            if isinstance(issue.story_titles, list):
+                md.title = "; ".join(issue.story_titles)
+            else:
+                md.title = str(issue.story_titles)
+        
+        if hasattr(issue, 'desc') and issue.desc:
+            md.comments = issue.desc  # Darkseid uses 'comments' for description
+        
+        # Publisher
+        if hasattr(issue, 'publisher') and issue.publisher:
+            md.publisher = issue.publisher.name
+        
+        # Dates
+        if hasattr(issue, 'cover_date') and issue.cover_date:
+            try:
+                date_obj = datetime.strptime(issue.cover_date, "%Y-%m-%d")
+                md.year = date_obj.year
+                md.month = date_obj.month
+                md.day = date_obj.day
+            except:
+                pass
+        
+        # Volume
+        if hasattr(issue, 'series') and issue.series and hasattr(issue.series, 'volume') and issue.series.volume:
+            md.volume = issue.series.volume
+        
+        # Credits
+        if hasattr(issue, 'credits') and issue.credits:
+            writers = []
+            pencillers = []
+            inkers = []
+            colorists = []
+            letterers = []
+            cover_artists = []
+            editors = []
+            
+            for credit in issue.credits:
+                role = credit.role[0].name.lower() if credit.role else ""
+                creator = credit.creator.name if credit.creator else ""
+                
+                if not creator:
+                    continue
+                
+                if "writer" in role:
+                    writers.append(creator)
+                elif "pencil" in role or "artist" in role:
+                    pencillers.append(creator)
+                elif "ink" in role:
+                    inkers.append(creator)
+                elif "color" in role:
+                    colorists.append(creator)
+                elif "letter" in role:
+                    letterers.append(creator)
+                elif "cover" in role:
+                    cover_artists.append(creator)
+                elif "editor" in role:
+                    editors.append(creator)
+            
+            if writers:
+                md.writer = ", ".join(writers)
+            if pencillers:
+                md.penciller = ", ".join(pencillers)
+            if inkers:
+                md.inker = ", ".join(inkers)
+            if colorists:
+                md.colorist = ", ".join(colorists)
+            if letterers:
+                md.letterer = ", ".join(letterers)
+            if cover_artists:
+                md.cover_artist = ", ".join(cover_artists)
+            if editors:
+                md.editor = ", ".join(editors)
+        
+        # Characters
+        if hasattr(issue, 'characters') and issue.characters:
+            char_names = [char.name for char in issue.characters if hasattr(char, 'name') and char.name]
+            if char_names:
+                md.characters = ", ".join(char_names)
+        
+        # Teams
+        if hasattr(issue, 'teams') and issue.teams:
+            team_names = [team.name for team in issue.teams if hasattr(team, 'name') and team.name]
+            if team_names:
+                md.teams = ", ".join(team_names)
+        
+        # Story arcs
+        if hasattr(issue, 'arcs') and issue.arcs:
+            arc_names = [arc.name for arc in issue.arcs if hasattr(arc, 'name') and arc.name]
+            if arc_names:
+                md.story_arc = ", ".join(arc_names)
+        
+        # Page count
+        if hasattr(issue, 'page_count') and issue.page_count:
+            md.page_count = issue.page_count
+        
+        # Web link
+        if hasattr(issue, 'id') and issue.id:
+            md.web_link = f"https://metron.cloud/issue/{issue.id}/"
+            md.notes = f"Metron ID: {issue.id}"
+        
+        return md
 
     def extract_metadata_from_issue(self, issue: Any) -> Dict[str, str]:
         """
@@ -575,19 +660,23 @@ def parse_filename(filename: str) -> tuple[Optional[str], Optional[str], Optiona
     Examples:
         "Amazing Spider-Man (2022) #001.cbz" -> ("Amazing Spider-Man", "1", 2022)
         "Batman 050 (2018).cbz" -> ("Batman", "50", 2018)
+        "Ultimates 009 (2016) GetComics.INFO" -> ("Ultimates", "9", 2016)
     
     Returns:
         Tuple of (series, issue_number, year) or (None, None, None)
     """
+    # Remove common suffixes like "GetComics.INFO", "digital", etc.
+    filename = re.sub(r'\s+(GetComics\.INFO|digital|c2c|web|HD|GDCP).*$', '', filename, flags=re.IGNORECASE)
+    
     # Pattern: Series Name (Year) #Number or Series Name Number (Year)
     patterns = [
         r'^(.+?)\s+\((\d{4})\)\s+#?(\d+(?:\.\d+)?)',  # Series (Year) #123
         r'^(.+?)\s+#?(\d+(?:\.\d+)?)\s+\((\d{4})\)',  # Series #123 (Year)
-        r'^(.+?)\s+(\d+(?:\.\d+)?)',                   # Series 123
+        r'^(.+?)\s+(\d+(?:\.\d+)?)$',                  # Series 123
     ]
     
     for pattern in patterns:
-        match = re.match(pattern, filename)
+        match = re.match(pattern, filename.strip())
         if match:
             groups = match.groups()
             if len(groups) == 3:
@@ -598,9 +687,14 @@ def parse_filename(filename: str) -> tuple[Optional[str], Optional[str], Optiona
                     series, number, year = groups[0].strip(), groups[1], int(groups[2])
                 else:
                     continue
+                
+                # Normalize issue number: remove leading zeros
+                number = str(int(float(number))) if '.' not in number else number
                 return series, number, year
             elif len(groups) == 2:
                 series, number = groups[0].strip(), groups[1]
+                # Normalize issue number: remove leading zeros
+                number = str(int(float(number))) if '.' not in number else number
                 return series, number, None
     
     return None, None, None
