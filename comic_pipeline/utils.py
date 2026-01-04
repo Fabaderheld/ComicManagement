@@ -43,20 +43,29 @@ def get_tag_element(xml, tag_name):
     return ET.SubElement(xml, tag_name)
 
 
-def collect_cbz_from_paths(paths: List[str]) -> List[str]:
+def collect_cbz_from_paths(paths: List[str], include_cbr: bool = False) -> List[str]:
     """
     Collect all CBZ files from given paths (files or directories).
+    
+    Args:
+        paths: List of file or directory paths
+        include_cbr: If True, also collect CBR and CB7 files
+        
+    Returns:
+        List of CBZ file paths (and CBR/CB7 if include_cbr=True)
     """
-    collected: List[str] = []
+    cbz_files = []
+    extensions = ['.cbz']
+    if include_cbr:
+        extensions.extend(['.cbr', '.cb7'])
     
-    for p in paths:
-        path = Path(p)
-        if path.is_dir():
-            for cbz in path.rglob("*.cbz"):
-                if "#recycle" in str(cbz):
-                    continue
-                collected.append(str(cbz))
-        elif path.is_file() and path.suffix.lower() == ".cbz":
-            collected.append(str(path))
+    for path_str in paths:
+        path = Path(path_str)
+        if path.is_file():
+            if path.suffix.lower() in extensions:
+                cbz_files.append(str(path))
+        elif path.is_dir():
+            for ext in extensions:
+                cbz_files.extend([str(f) for f in path.rglob(f'*{ext}')])
     
-    return collected
+    return sorted(cbz_files)

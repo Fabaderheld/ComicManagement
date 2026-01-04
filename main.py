@@ -70,6 +70,19 @@ Examples:
         action='store_true',
         help='Enable verbose output'
     )
+    # In the global arguments section (before subparsers), add:
+    parser.add_argument(
+        '--metron-user',
+        help='Metron username (or set METRON_USER env var)',
+        default=os.getenv('METRON_USER')
+    )
+    parser.add_argument(
+        '--metron-pass',
+        help='Metron password (or set METRON_PASS env var)',
+        default=os.getenv('METRON_PASS')
+    )
+
+
     
     # Subcommands
     sub = parser.add_subparsers(dest='cmd', help='Command to run')
@@ -111,9 +124,14 @@ Examples:
     kapowarr_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying')
     
     # metron command
-    metron_parser = sub.add_parser('metron', help='Scrape metadata using Metron')
+    metron_parser = sub.add_parser('metron', help='Scrape metadata using Metron API')
     metron_parser.add_argument('paths', nargs='+', help='Files or directories to scrape')
-    metron_parser.add_argument('--dry-run', action='store_true', help='Preview what would be scraped')
+    metron_parser.add_argument('--overwrite', action='store_true',
+                            help='Overwrite existing metadata fields (default: only fill empty fields)')
+    metron_parser.add_argument('--dry-run', action='store_true',
+                            help='Preview what would be scraped without modifying files')
+    metron_parser.add_argument('--verbose', action='store_true',
+                            help='Enable verbose output')
     
     # pipeline command
     pipeline_parser = sub.add_parser('pipeline', help='Run full processing pipeline')
@@ -124,6 +142,14 @@ Examples:
     pipeline_parser.add_argument('--skip-repair', action='store_true', help='Skip repair step')
     pipeline_parser.add_argument('--dry-run', action='store_true', help='Preview all changes without applying')
     
+    # convert command
+    convert_parser = sub.add_parser('convert', help='Convert CBR/CB7 files to CBZ')
+    convert_parser.add_argument('paths', nargs='+', help='Files or directories to convert')
+    convert_parser.add_argument('--delete-original', action='store_true',
+                            help='Delete original files after successful conversion')
+    convert_parser.add_argument('--verbose', action='store_true',
+                            help='Enable verbose output')
+
     # Parse arguments
     args = parser.parse_args()
     
@@ -206,11 +232,41 @@ Examples:
             )
         
         elif args.cmd == 'metron':
+            if not args.metron_user or not args.metron_pass:
+                print(f"{Colors.RED}✗{Colors.RESET} Metron username and password required", file=sys.stderr)
+                print("  Set via --metron-user/--metron-pass or METRON_USER/METRON_PASS env vars", file=sys.stderr)
+                sys.exit(1)
+            
             cbz_files = collect_cbz_from_paths(args.paths)
             if not cbz_files:
                 print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found", file=sys.stderr)
                 sys.exit(1)
-            metron_scrape(cbz_files, dry_run=args.dry_run, verbose=args.verbose)
+            
+            metron_scrape(cbz_files, username=args.metron_user, password=args.metron_pass, 
+                        overwrite=args.overwrite, dry_run=args.dry_run, verbose=args.verbose)
+
+        elif args.cmd == 'convert':
+            files = collect_cbz_from_paths(args.paths, include_cbr=True)
+            files = [f for f in files if f.endswith(('.cbr', '.cb7'))]
+            
+            if not files:
+                print(f"{Colors.RED}✗{Colors.RESET} No CBR or CB7 files found", file=sys.stderr)
+                sys.exit(1)
+            
+            print(f"{Colors.BLUE}[CONVERT]{Colors.RESET} Converting {len(files)} file(s)...\n", file=sys.stderr)
+            
+            successful, failed = batch_convert_to_cbz(files, delete_original=args.delete_original,
+                                                    verbose=args.verbose)
+            
+            print(f"\n{'='*60}", file=sys.stderr)
+            print("CONVERSION SUMMARY", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"Total files: {len(files)}", file=sys.stderr)
+            print(f"{Colors.GREEN}✓{Colors.RESET} Converted: {len(successful)}", file=sys.stderr)
+            print(f"{Colors.RED}✗{Colors.RESET} Failed: {len(failed)}", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            
+            sys.exit(0 if not failed else 1)
         
         elif args.cmd == 'pipeline':
             run_pipeline(
