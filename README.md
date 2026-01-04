@@ -1,6 +1,3 @@
-Here's a comprehensive README for your comic pipeline script:
-
-```markdown
 # Comic Pipeline Helper
 
 A Python CLI tool for managing and normalizing comic book archives (CBZ/CBR), with automated scraping, metadata normalization, and image optimization.
