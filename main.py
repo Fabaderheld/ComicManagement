@@ -105,9 +105,10 @@ Examples:
     normalize_parser.add_argument('paths', nargs='+', help='Files or directories to normalize')
     normalize_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying')
     normalize_parser.add_argument('--scan', action='store_true', help='Only scan, don\'t normalize')
-    normalize_parser.add_argument('--output-format', choices=['console', 'json', 'list'], 
-                                 default='console', help='Output format (scan mode only)')
+    normalize_parser.add_argument('--output-format', choices=['console', 'json', 'list'],
+                                default='console', help='Output format (scan mode only)')
     normalize_parser.add_argument('--output-file', help='Write output to file (scan mode only)')
+    normalize_parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     
     # webp command
     webp_parser = sub.add_parser('webp', help='Convert images to WebP format')
@@ -155,6 +156,12 @@ Examples:
                             help='Delete original files after successful conversion')
     convert_parser.add_argument('--verbose', action='store_true',
                             help='Enable verbose output')
+
+    # rename command
+    rename_parser = sub.add_parser('rename', help='Rename comics based on metadata')
+    rename_parser.add_argument('paths', nargs='+', help='Files or directories to rename')
+    rename_parser.add_argument('--base-path', help='Base directory for organizing (default: same as source)')
+    rename_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying')
 
     # Parse arguments
     args = parser.parse_args()
@@ -272,6 +279,18 @@ Examples:
             print(f"{Colors.RED}✗{Colors.RESET} Failed: {len(failed)}", file=sys.stderr)
             print(f"{'='*60}", file=sys.stderr)
             
+            sys.exit(0 if not failed else 1)
+
+        elif args.cmd == 'rename':
+            from comic_pipeline import rename_comics
+            
+            cbz_files = collect_cbz_from_paths(args.paths)
+            if not cbz_files:
+                print(f"{Colors.RED}✗{Colors.RESET} No CBZ files found", file=sys.stderr)
+                sys.exit(1)
+            
+            successful, failed = rename_comics(cbz_files, base_path=args.base_path,
+                                            dry_run=args.dry_run, verbose=args.verbose)
             sys.exit(0 if not failed else 1)
         
         elif args.cmd == 'pipeline':
