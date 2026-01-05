@@ -14,7 +14,7 @@ except ImportError:
     ApiError = Exception
 
 from darkseid.comic import Comic, MetadataFormat
-from darkseid.metadata import Metadata, Series, Publisher, Notes, AgeRatings
+from darkseid.metadata import Metadata, Series, Publisher, Notes, AgeRatings, Credit, Role
 
 from .utils import Colors
 
@@ -374,16 +374,11 @@ class MetronScraper:
                 md.age_rating = AgeRatings(comic_rack=rating_name)
 
         # ===== CREDITS (CREATORS) =====
+        from darkseid.metadata import Credit, Role
 
         if hasattr(issue, 'credits') and issue.credits:
-            writers = []
-            pencillers = []
-            inkers = []
-            colorists = []
-            letterers = []
-            cover_artists = []
-            editors = []
-
+            credits_list = []
+            
             for credit in issue.credits:
                 # Skip if no role
                 if not hasattr(credit, 'role') or not credit.role:
@@ -397,7 +392,7 @@ class MetronScraper:
                 for r in role_list:
                     role_name = getattr(r, 'name', None)
                     if role_name:
-                        role_names.append(role_name.lower())
+                        role_names.append(role_name)
 
                 if not role_names:
                     continue
@@ -406,70 +401,47 @@ class MetronScraper:
                 creator_name = None
                 if hasattr(credit, 'creator') and credit.creator:
                     creator_name = (getattr(credit.creator, 'name', None) or 
-                                   getattr(credit.creator, 'creator_name', None) or
-                                   str(credit.creator))
+                                getattr(credit.creator, 'creator_name', None) or
+                                str(credit.creator))
 
                 if not creator_name:
                     continue
 
-                # Match roles to credit types
-                # Use a flag to avoid adding the same person to multiple roles for one credit
-                matched = False
+                # Create Credit objects for each role
                 for role in role_names:
-                    if not matched and ("writer" in role or "plot" in role or "script" in role):
-                        writers.append(creator_name)
-                        matched = True
-                    elif not matched and ("pencil" in role or ("artist" in role and "cover" not in role)):
-                        pencillers.append(creator_name)
-                        matched = True
-                    elif not matched and "ink" in role:
-                        inkers.append(creator_name)
-                        matched = True
-                    elif not matched and ("color" in role or "colour" in role):
-                        colorists.append(creator_name)
-                        matched = True
-                    elif not matched and "letter" in role:
-                        letterers.append(creator_name)
-                        matched = True
-                    elif not matched and "cover" in role:
-                        cover_artists.append(creator_name)
-                        matched = True
-                    elif not matched and "editor" in role:
-                        editors.append(creator_name)
-                        matched = True
+                    # Map Metron roles to ComicInfo roles
+                    comicinfo_role = None
+                    role_lower = role.lower()
+                    
+                    if "writer" in role_lower or "plot" in role_lower or "script" in role_lower:
+                        comicinfo_role = "Writer"
+                    elif "pencil" in role_lower or ("artist" in role_lower and "cover" not in role_lower):
+                        comicinfo_role = "Penciller"
+                    elif "ink" in role_lower:
+                        comicinfo_role = "Inker"
+                    elif "color" in role_lower or "colour" in role_lower:
+                        comicinfo_role = "Colorist"
+                    elif "letter" in role_lower:
+                        comicinfo_role = "Letterer"
+                    elif "cover" in role_lower:
+                        comicinfo_role = "CoverArtist"
+                    elif "editor" in role_lower:
+                        comicinfo_role = "Editor"
+                    elif "translat" in role_lower:
+                        comicinfo_role = "Translator"
+                    
+                    if comicinfo_role:
+                        # Create Role object as a LIST, then Credit object
+                        role_obj = Role(name=comicinfo_role)
+                        credits_list.append(Credit(person=creator_name, role=[role_obj]))
 
-            # Set credit fields (remove duplicates while preserving order)
-            if writers:
-                md.writer = ", ".join(list(dict.fromkeys(writers)))
-            if pencillers:
-                md.penciller = ", ".join(list(dict.fromkeys(pencillers)))
-            if inkers:
-                md.inker = ", ".join(list(dict.fromkeys(inkers)))
-            if colorists:
-                md.colorist = ", ".join(list(dict.fromkeys(colorists)))
-            if letterers:
-                md.letterer = ", ".join(list(dict.fromkeys(letterers)))
-            if cover_artists:
-                md.cover_artist = ", ".join(list(dict.fromkeys(cover_artists)))
-            if editors:
-                md.editor = ", ".join(list(dict.fromkeys(editors)))
+            # Debug: Show what we collected
+            print(f"  DEBUG Credits collected: {len(credits_list)} credits")
+            for c in credits_list:
+                print(f"    {c.role[0].name}: {c.person}")
 
-        # ===== CHARACTERS & TEAMS =====
-
-        # Characters - darkseid expects list of objects with .name attribute
-        if hasattr(issue, 'characters') and issue.characters:
-            char_list = []
-            for char in issue.characters:
-                if isinstance(char, str):
-                    char_list.append(Resource(char))
-                else:
-                    char_name = (getattr(char, 'display_name', None) or 
-                                getattr(char, 'character_name', None) or 
-                                getattr(char, 'name', None))
-                    if char_name:
-                        char_list.append(Resource(char_name))
-            if char_list:
-                md.characters = char_list
+            # Set the credits list
+            md.credits = credits_list
 
         # Teams - darkseid expects list of objects with .name attribute
         if hasattr(issue, 'teams') and issue.teams:
